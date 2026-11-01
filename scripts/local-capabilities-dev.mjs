@@ -1,0 +1,16 @@
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CapabilitySupervisor } from '../plugins/surfcore/lib/local-capabilities/supervisor.js';
+import { LocalCapabilities } from '../plugins/surfcore/lib/local-capabilities/facade.js';
+import { createManagementHandler } from '../plugins/surfcore/lib/local-capabilities/management.js';
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.join(repo, '.local/local-capabilities-dev');
+const supervisor = new CapabilitySupervisor({ python: process.env.SURFCORE_LOCAL_PYTHON || path.join(repo, '.venv/Scripts/python.exe'), entry: path.join(repo, 'services/local-capabilities/server.py'), dataDir: path.join(root, 'data') });
+const capabilities = new LocalCapabilities({ supervisor, stateFile: path.join(root, 'backend.json'), currentCharacter: () => ({ id: 'isolated-local-test', epoch: 1 }) });
+const handler = createManagementHandler({ capabilities });
+const server = http.createServer((req,res) => { if (req.url === '/') { res.writeHead(302,{location:'/local-capabilities'});res.end();return; } void handler(req,res); });
+const port = Number(process.env.SURFCORE_LOCAL_PORT || 3210);
+server.listen(port, '127.0.0.1', () => console.log(`SurfCore isolated local memory: http://127.0.0.1:${port}/local-capabilities`));
+server.on('error', () => { console.error('本地管理端口不可用；请设置 SURFCORE_LOCAL_PORT 后重试。');process.exitCode=1; });
+for(const signal of ['SIGINT','SIGTERM']) process.on(signal, async()=>{server.close();await supervisor.stop();process.exit();});

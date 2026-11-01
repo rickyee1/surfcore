@@ -14,6 +14,7 @@
  * 桌宠没开着的兜底：默认回落到 QQ（purpose.petFallbackToQQ=true）——让桥接按它自己的
  * 闸门和排程发，桌面端不重复发；关掉就宁可这轮不发，也不换载体。
  */
+import { errorResult } from './local-capabilities/supervisor.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -137,6 +138,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
 
   // ── 素材 ────────────────────────────────────────────────────────────────
   function conversationsFromDisk() {
+    if (chat.localCapabilities?.guarded) return [];
     const raw = readJson(path.join(QQ_STATE_DIR, 'social-v2.json'), {});
     const map = raw?.conversations && typeof raw.conversations === 'object' ? raw.conversations : {};
     return Object.entries(map).map(([key, value]) => ({
@@ -150,6 +152,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
   }
 
   function biliEntries() {
+    if (chat.localCapabilities?.guarded) return [];
     try {
       const dir = activeBiliDir();
       const raw = readJson(path.join(dir, 'bili-memory.json'), null);
@@ -158,6 +161,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
   }
 
   function memoryRecords() {
+    if (chat.localCapabilities?.guarded) return [];
     try {
       const raw = readJson(activeMemoryPaths().json, null);
       return Array.isArray(raw?.records) ? raw.records : [];
@@ -415,8 +419,22 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
 
     running = true;
     const now = Date.now();
+    let localContext = null, outreach = null, outcome = 'failed';
+    const local = chat.localCapabilities;
     try {
+      if (local?.guarded) {
+        localContext = await local.context({ kind: 'pet' });
+        const id = `purpose:${Math.floor(now / 60000)}`;
+        const check = await local.supervisor.raw('attention.check', localContext.binding, { outreach_id: id });
+        if (!check.allowed) return { ok: false, reason: check.reason, code: 'PERMISSION_DENIED', error: '主动联系当前受限。', hint: '检查本地注意力设置。' };
+        if (!previewOnly) {
+          const reserved = await local.supervisor.raw('attention.reserve', localContext.binding, { outreach_id: id });
+          if (!reserved.reserved) return { ok: false, reason: reserved.reason };
+          outreach = { id, reservation_id: reserved.reservation_id };
+        }
+      }
       const state = loadState();
+      if (chat.localCapabilities?.guarded) { state.pending = []; state.observations = []; state.goals = []; state.history = []; state.drives = {};  }
       ensurePurposeDay(state, now);
       let budgetBlocked = false;
       if (tokenBudget?.block) {
@@ -477,6 +495,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
         return { ok: false, reason: 'no-purpose' };
       }
       const prompt = buildPrompt({ prepared, selection, modality: p.modality });
+      if (localContext?.text) prompt.system += `\n受众过滤后的共同经历：\n${localContext.text}`;
       if (previewOnly) {
         return {
           ok: true,
@@ -522,7 +541,9 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
         return { ok: false, reason: 'silent', selected: selection.purpose };
       }
 
-      const delivered = await chat.proactive({ text, modality: p.modality, purpose: selection.purpose });
+      outcome = 'unknown';
+      const delivered = await chat.proactive({ text, modality: p.modality, purpose: selection.purpose, localContext, outreach });
+      outcome = delivered.ok && localContext ? null : delivered.ok ? 'sent' : 'failed';
       if (!delivered.ok) {
         applyPurposeOutcome(state, {
           now: Date.now(), config: p.config, outcome: 'failed', text: '', planned: selection.purpose,
@@ -549,8 +570,12 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     } catch (error) {
       lastError = String(error?.message ?? error).slice(0, 200);
       pluginLog('[pet-purpose] 运行失败：', lastError);
-      return { ok: false, reason: 'error', error: lastError };
+      return local?.guarded ? errorResult(error) : { ok: false, reason: 'error', error: lastError };
     } finally {
+      if (outreach && localContext && outcome) {
+        try { await local.supervisor.raw('attention.finalize', localContext.binding, { outreach_id: outreach.id, outcome }); }
+        catch (e) { lastError = errorResult(e).error; }
+      }
       running = false;
     }
   }

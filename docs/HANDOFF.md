@@ -1,5 +1,9 @@
 # 交接状态（HANDOFF）
 
+## 2026-11-02：路遥融合fork
+
+新分支实现加密本地能力服务、管理页和QQ/桌宠适配；部署使用隔离DSH_HOME与测试角色。上游基线59ec3066，版本仍0.8.6。最终验证和未完成范围见[cases/2026-11-02-local-capabilities.md](cases/2026-11-02-local-capabilities.md)，使用见[LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。真实QQ、surfpet及模型对照尚未验收，B站自主发送明确暂停；不把本次当完整M2发布。
+
 > 给「半天后的我」和接手的人：**现在做到哪、什么没验证、下一步按什么顺序做**。
 > 每次开工先读这里，收工前更新这里。时间一律写本地时间（Asia/Shanghai）。
 

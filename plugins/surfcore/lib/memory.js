@@ -16,6 +16,7 @@
  * 两个方向都不搬运：私信、密码、令牌、联系方式、住址、精确位置、真实姓名。
  */
 import fs from 'node:fs';
+import { localBackendGuarded } from '../../../src/local-capabilities-state.js';
 import path from 'node:path';
 import {
   AUDIT_LOG, BILI_AI_DIR, BILI_ALIGNMENT_FILE, BILI_CONFIG, BILI_CRED,
@@ -294,6 +295,7 @@ function writeSyncState(patch) {
 
 /** QQ → B站：生成脱敏记忆文件。 */
 export function syncQqToBili({ force = false } = {}) {
+  if (localBackendGuarded()) return { ok: false, code: 'LEGACY_SYNC_DISABLED', error: '本地模式停用旧跨平台记忆同步。', hint: '请在本地能力管理端明确管理公开记忆。' };
   const all = readAll();
   const unified = all.unified;
   const qq = all.qq;
@@ -328,6 +330,7 @@ export function syncQqToBili({ force = false } = {}) {
 
 /** 读取 QQ → B站 记忆文件（给 UI 预览/给 B站调度器注入）。 */
 export function readQqForBili({ maxChars = 6000 } = {}) {
+  if (localBackendGuarded()) return { ok: true, text: '', chars: 0, blocked: true };
   try {
     const text = fs.readFileSync(qqForBiliFile(), 'utf8').trim();
     const scan = scanText(text);
@@ -368,6 +371,7 @@ export function biliToQqStatus() {
 
 /** QQ 方向的手动刷新：通过桥接控制台触发它自己的 bili-memory 生成器。 */
 export async function refreshBiliToQq({ callBridge }) {
+  if (localBackendGuarded()) return { ok: false, code: 'LEGACY_SYNC_DISABLED', error: '本地模式停用旧跨平台记忆同步。', hint: '请使用受众隔离的本地能力记忆。' };
   if (typeof callBridge !== 'function') return { ok: false, error: '桥接控制不可用' };
   const result = await callBridge('/api/bili/memory/refresh', { method: 'POST', body: {} });
   if (!result.ok) return { ok: false, error: result.data?.error || result.error || `HTTP ${result.status}` };

@@ -10,6 +10,8 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
+    "dev:local-memory": "node scripts/local-capabilities-dev.mjs",
+    "test:local-capabilities": "node scripts/test-local-capabilities-service.mjs && node scripts/test-local-capabilities-integration.mjs && node scripts/test-local-capabilities-integration-pet.mjs && node scripts/test-local-capabilities-channels.mjs",
     "test:audit": "node scripts/test-audit.mjs",
     "test:token": "node scripts/test-token-economy.mjs && node scripts/test-reply-wait.mjs && node scripts/test-qq-model-view.mjs && node scripts/test-qq-preset-contract.mjs",
     "test:tokens": "node scripts/test-token-usage.mjs",

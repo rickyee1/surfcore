@@ -15,6 +15,8 @@
  * 为什么用"她自己的会话"：`sessionId` 固定（默认 bili-whale）→ 跨天保留她的上下文，
  *   而不是每天开一个新会话、每天忘光 ✗。
  */
+import { localBackendGuarded } from '../../../src/local-capabilities-state.js'
+import { localCapabilities } from './local-capabilities/host.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -160,6 +162,7 @@ export function adminBlockForBili() {
 
 /** QQ → B站 的脱敏记忆（默认关闭；开启后才注入）。 */
 function qqMemoryBlockForBili() {
+  if (localBackendGuarded()) return ''
   const unified = readUnified().config
   if (unified.memory?.qqToBili?.enabled !== true) return ''
   const text = readTextFile(activeMemoryPaths().qqForBili)
@@ -169,6 +172,7 @@ function qqMemoryBlockForBili() {
 
 /** 记忆卡（B站侧）：只拿公开冲浪记忆 + 共享锚点，不含 QQ 私事（隐私边界）。 */
 function memoryCardBlockForBili() {
+  if (localBackendGuarded()) return ''
   const unified = readUnified().config
   if (unified.memoryCard?.enabled === false) return ''
   return memoryCardPromptBlock('bili')
@@ -483,6 +487,11 @@ export function startScheduler(ctx, opts) {
     return false
   }
   async function promptBili(args, signal, where = '叫醒') {
+    if (localBackendGuarded()) {
+      const error = Object.assign(new Error('B站自动发送尚不能携带可信代次，已停止自主模型唤醒。'), { code: 'BILI_GENERATION_UNVERIFIED', hint: '本地模式可查看公开记忆；请等待 B站 CLI 发送链路接入上下文复核。' })
+      log(`[local-capabilities] ${error.code}: ${error.message} ${error.hint}`)
+      throw error
+    }
     if (tokenBudget?.block) {
       try {
         const gate = await tokenBudget.block('bili')
@@ -1187,4 +1196,12 @@ export function startScheduler(ctx, opts) {
     listenTick,
     liveTick,
   }
+}
+
+/** Public-only projection; never reads shared cards, QQ summaries or private diaries. */
+export async function localBiliPublicContext(account = 'public') {
+  const facade = localCapabilities()
+  const context = await facade.context({ kind: 'bili', account: String(account), peer: 'public', principal: 'public' }, '')
+  await facade.validate(context)
+  return { text: context.text || '', memory_epoch: context.memory_epoch }
 }

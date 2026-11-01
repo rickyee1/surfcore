@@ -27,6 +27,7 @@
  * 本文件是纯 Node 模块：桥接进程、插件宿主进程、单测都能直接用。
  */
 import crypto from 'node:crypto';
+import { localBackendGuarded } from './local-capabilities-state.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -2028,6 +2029,7 @@ export function addManualMemory(card, { text, title = '', importance, scope = 'q
 
 /** 桥接进程调用：把一条 QQ 事件追加到 inbox（只追加，不做重活）。 */
 export function appendMemoryInboxEvent(paths, event = {}, { maxBytes = 1024 * 1024 } = {}) {
+  if (localBackendGuarded()) return false;
   try {
     const text = redactForMemory(event.text, { scope: 'qq', maxChars: 500 });
     if (!text || text.startsWith('/')) return false;

@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 .npm-cache/
+.venv/
+.local/
+.ai-work/
+__pycache__/
+*.pyc
 
 # Runtime state and local config (never publish)
 state/

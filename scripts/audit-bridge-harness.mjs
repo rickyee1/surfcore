@@ -1,6 +1,7 @@
 // Execute the real bridge initialization/functions against temporary files and fake peers.
 // No production config, QQ connection, DSH process, or persistent home is accessed.
 import fs from 'node:fs';
+import { LocalChannelBridge, channelError } from '../src/local-capabilities-bridge.js';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -153,6 +154,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       selectModel: async () => success({ selected: { provider: 'fixture', model: 'fixture' } }),
       prompt: async (params) => { calls.prompts.push(params); return success({}); },
     },
+    ensureAuth: async () => 'fixture-auth-cookie',
     respond: async () => success({}),
     stopSessionWork: async (sessionId) => { calls.cancelled.push(sessionId); return { removed: 0 }; },
     cancelTurn: async (sessionId) => { calls.cancelled.push({ cancelTurn: sessionId }); return { ok: true }; },
@@ -190,7 +192,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
-    ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
+    localChannels, ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     fishChatWindows, evaluateConversationFishGuard, fishGuardSendBlock, recordFishWindow,
@@ -234,6 +236,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   const context = vm.createContext({
     fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
     fetch: fakeFetch,
+    LocalChannelBridge: class extends LocalChannelBridge { constructor(options) { super({ ...options, guarded: () => false, mode: () => 'legacy', fetchImpl: globals.fetch || fakeFetch }); } },
+    channelError, localBackendGuarded: () => false, localBackendMode: () => 'legacy',
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
     // 固定桩掉：测试不应该真去 netstat 宿主机。
     execFileSync: () => '',

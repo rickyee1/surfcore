@@ -1,0 +1,47 @@
+{
+  "task": "S1 /root/capability_service",
+  "date": "2026-11-02",
+  "target_baseline": "59ec3066f7d42a0452fae01f170c9a8484d5dbe5",
+  "source_root": "Luyao local working tree; identified by source file hashes below",
+  "source_head_reference": "65c39769083b351a2e89a0278676daa02b700047 (working tree differs; file hashes are authoritative)",
+  "adaptation": "Conceptual adaptation and purpose-built implementation: SQLCipher key pragma/no fallback; episodes/assertions/revisions, actor and pinned sovereignty; proposal revision checks and auto-write epoch; proactive quiet/cooldown/unanswered intensity. No source modules are imported or runtime-linked; no LLM/vector dependencies copied.",
+  "source_files": [
+    {
+      "path": "memory/connection.py",
+      "sha256": "405375855fdf46beb0c8e2e4d8f218bc4aaf006bb562976a35b6c82ac4529345"
+    },
+    {
+      "path": "memory/domain_store.py",
+      "sha256": "d010387f08b4171151127f7658101549d27ab087268fb2f6d4897db4d971f457"
+    },
+    {
+      "path": "memory/service.py",
+      "sha256": "11abc7aa5079fac86bef1a77d98eb8275e889cb2cc38f70270d818809cb92042"
+    },
+    {
+      "path": "memory/writer.py",
+      "sha256": "32c12347abbeeb165407be403c3b600c96a98b75514c886096dbec563da63f5d"
+    },
+    {
+      "path": "memory/sqlite_store.py",
+      "sha256": "0cf14b0466a731fe95c0a17207d039685ccc47303a239a70a45c35c7365fcc92"
+    },
+    {
+      "path": "session/proactive_budget.py",
+      "sha256": "b52db4f0c952d5ba39c98096be3d247bdd19dfab3cd9637d0852544facabd6b8"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "Python",
+      "version": "3.13",
+      "role": "runtime and standard library DPAPI ctypes/MSVCRT lock"
+    },
+    {
+      "name": "sqlcipher3",
+      "version": "0.6.2",
+      "role": "only database driver; SQLCipher required"
+    }
+  ],
+  "license_note": "Source adaptation attribution recorded here; no claim that external app/assets licensing is transferred."
+}

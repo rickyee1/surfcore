@@ -6,6 +6,8 @@
 //
 // 用法：node src/bridge.js （先编辑 ../config.json）
 import fs from 'node:fs';
+import { LocalChannelBridge, channelError } from './local-capabilities-bridge.js';
+import { localBackendGuarded, localBackendMode } from './local-capabilities-state.js';
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
@@ -1698,6 +1700,7 @@ let stateDirHardened = null;
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
+  const localChannels = new LocalChannelBridge({ config: () => cfg });
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
@@ -2328,7 +2331,7 @@ async function main() {
         const params = kind === 'private'
           ? { user_id: Number(id), message: [recordSegment] }
           : { group_id: Number(id), message: [recordSegment] };
-        const res = await fetch(`${httpUrl}/${action}`, {
+        const res = await localChannels.sendFetch(key, `${httpUrl}/${action}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -2521,7 +2524,7 @@ async function main() {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
         assertSendAllowed();
-        const res = await fetch(`${httpUrl}/${action}`, {
+        const res = await localChannels.sendFetch(key, `${httpUrl}/${action}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -2979,6 +2982,7 @@ async function main() {
   }
 
   function withSlangContext(promptText) {
+    if (localBackendGuarded()) return promptText;
     const now = new Date();
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
     const parts = [timeLine];
@@ -2992,6 +2996,7 @@ async function main() {
   // 身份对齐置顶：只对群聊注入（私聊不需要，也避免把群成员映射带进私聊）。
   // 它不读 cfg.biliBridge.memory.enabled —— 对齐高于记忆同步开关，这是产品约定。
   function withAlignmentContext(key, promptText) {
+    if (localBackendGuarded()) return promptText;
     if (!String(key ?? '').startsWith('group:')) return promptText;
     const block = alignmentBriefBlock();
     if (!block) return promptText;
@@ -3074,6 +3079,20 @@ async function main() {
   // 调用会抛 “api.sessions.modelCatalog is not a function”，让思考强度档位静默退回内置清单。
   // 这里直接用桥接自己覆写的 callUnary（它本来就是为「不依赖旧版客户端域方法」而存在的），
   // 并保留一次 `session/models` 回落以兼容更老的 DSH。
+  localChannels.authHeaders = async () => ({ cookie: await api.ensureAuth() });
+  const originalSessionPrompt = api.sessions.prompt.bind(api.sessions);
+  api.sessions.prompt = async (args, ...rest) => {
+    if (!localBackendGuarded()) return originalSessionPrompt(args, ...rest);
+    const key = reverse.get(args.sessionId);
+    if (!key) throw channelError('BINDING_INVALID', '本地模式不允许无可信渠道的模型提示。');
+    const st = currentMode === 'reserved2' ? getSocialV2State(key) : null;
+    if (st) {
+      st.agentToken = crypto.randomBytes(24).toString('hex'); rememberAgentToken(key, st.agentToken);
+      st.unread = []; st.recentMessages = []; st.pendingThoughts = []; st.activeTopics = []; st.memberImpressions = {};
+    }
+    const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '');
+    return originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest);
+  };
   const modelCatalogErrorLogged = new Set();
   async function fetchModelCatalog() {
     try {
@@ -3454,7 +3473,7 @@ async function main() {
   }
 
   function sessionPolicy(key) {
-    return JSON.stringify([currentMode, modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null]);
+    return JSON.stringify([currentMode, localBackendMode(), readCurrentCharacter()?.id || '', modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null]);
   }
 
   function isCurrentSession(key, sessionId) {
@@ -4253,8 +4272,14 @@ async function main() {
         'Referrer-Policy': 'no-referrer'
       };
       const sendJson = (obj, status = 200) => {
-        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
-        res.end(JSON.stringify(obj, null, 2));
+        const emit = (value, code) => {
+          if (res.writableEnded) return;
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+          res.end(JSON.stringify(value, null, 2));
+        };
+        if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) && obj.ok !== false) {
+          void localChannels.validateOrigin().then(() => emit(obj, status), error => emit({ ok: false, code: error.code, error: error.message, hint: error.hint }, 409));
+        } else emit(obj, status);
       };
       const readBody = () => new Promise((resolve, reject) => {
         const MAX_BODY_BYTES = 1_000_000;
@@ -4405,6 +4430,14 @@ async function main() {
             sendJson({ ok: false, error: '跨站请求被拒绝' }, 403);
             return;
           }
+        }
+      }
+      if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined)) {
+        localChannels.enterToken(req.headers['x-agent-token']);
+        const blocked = /memory|slang|forward|message-detail|my-recent|snapshot|\/prompt$|\/recent$|\/unread$/.test(url.pathname);
+        if (blocked) {
+          sendJson({ ok: false, code: 'LEGACY_CONTEXT_DISABLED', error: '本地模式不提供旧历史、记忆卡或跨平台副本。', hint: '请使用本轮可信提示中的有效记忆和当前消息。' }, 403);
+          return;
         }
       }
       try {
@@ -6766,6 +6799,7 @@ async function main() {
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-poke') {
+          if (localBackendGuarded()) { sendJson({ ok: false, code: 'UNVERIFIED_DELIVERY', error: '本地模式暂不发送无可靠回执的拍一拍。', hint: '请使用本轮文字回复。' }, 403); return; }
           const body = await readBody();
           const key = String(body.key ?? '').trim();
           const targetUserId = String(body.targetUserId ?? body.userId ?? '').trim();
@@ -8899,7 +8933,7 @@ async function main() {
         sendJson({ ok: false, error: 'not found' }, 404);
       } catch (error) {
         const status = Number(error?.statusCode) || 500;
-        sendJson({ ok: false, error: error?.message ?? String(error) }, status);
+        sendJson({ ok: false, code: error?.code || 'CHANNEL_REQUEST_FAILED', error: error?.message ?? String(error), hint: error?.hint || '检查渠道状态后重新发起本轮。' }, status);
       }
     });
     server.listen(port, '127.0.0.1', () => {
@@ -9193,7 +9227,7 @@ async function main() {
     const sendKey = `${kind}:${id}`;
     let res;
     try {
-      res = await fetch(`${httpUrl}/${action}`, {
+      res = await localChannels.sendFetch(sendKey, `${httpUrl}/${action}`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -9224,7 +9258,7 @@ async function main() {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
+    const res = await localChannels.sendFetch(`${kind}:${id}`, `${httpUrl}/${action}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -9833,9 +9867,11 @@ async function main() {
   }
 
   async function ensureSession(key) {
+    if (localBackendGuarded() && currentMode === 'closed-agent') throw channelError('UNSCOPED_TOOLS_DISABLED', '本地模式暂不开放可读取旧文件的 closed-agent 工具面。', '切换到 chat、reserved 或 reserved2 模式后重试。');
     const epoch = sessionEpoch;
     const policy = sessionPolicy(key);
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+    if (localBackendGuarded() && state.sessions[key]) retireSession(key);
     const existing = state.sessions[key];
     if (existing) {
       // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
@@ -10187,6 +10223,16 @@ async function main() {
       socialV2.conversations.set(key, st);
       scheduleProactiveCheckV2(key);
       setupSleepTimerV2(key);
+    }
+    if (localBackendGuarded()) {
+      const identity = JSON.stringify([readCurrentCharacter()?.id || '', localChannels.channels.get(key)?.account || '']);
+      if (st.localCapabilityIdentity !== identity) {
+        st.localCapabilityIdentity = identity;
+        st.unread = []; st.recentMessages = []; st.pendingThoughts = [];
+        st.activeTopics = []; st.memberImpressions = {}; st.closure = null;
+        st.memory = []; st.agentToken = crypto.randomBytes(24).toString('hex');
+        rememberAgentToken(key, st.agentToken);
+      }
     }
     return st;
   }
@@ -11430,6 +11476,7 @@ async function main() {
   }
 
   function purposeContextBlocks() {
+    if (localBackendGuarded()) return [];
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）` : '';
     const identityLine = selfIdentityTextV2();
@@ -12452,6 +12499,7 @@ async function main() {
   // 不解析 JSON、不依赖插件代码——桥接和插件是不同进程，文件是唯一契约。
   let memoryCardPromptCache = { key: '', text: '' };
   function memoryCardPromptBlock() {
+    if (localBackendGuarded()) return '';
     try {
       const stat = fs.statSync(MEMORY_CARD_PATHS.promptQq);
       const key = `${stat.mtimeMs}:${stat.size}`;
@@ -12599,7 +12647,7 @@ async function main() {
         { type: 'text', data: { text: ` ${text}` } }
       ]
     };
-    const res = await fetch(`${httpUrl}/send_group_msg`, {
+    const res = await localChannels.sendFetch(key, `${httpUrl}/send_group_msg`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -14262,6 +14310,7 @@ async function main() {
   }
 
   async function runHistoryCatchUp(trigger = 'online', { force = false } = {}) {
+    if (localBackendGuarded()) return { ok: false, code: 'LEGACY_HISTORY_DISABLED', error: '本地模式不导入旧平台历史。', hint: '如需迁移，请使用管理端隔离迁移。' };
     const conf = historyCatchUpConfig();
     if (!conf.enabled) return { ok: true, disabled: true, results: [] };
     if (currentMode !== 'reserved2' || cfg.socialV2?.enabled === false) {
@@ -14451,6 +14500,7 @@ async function main() {
   //   · 群友消息：只记直接对她说、引用她、或明显有情绪/约定/道歉的，避免把整个群搬进记忆。
   //   · 私聊（非主人）：白名单好友的长消息记一条低权重的，短寒暄不记。
   function recordMemoryInboxEvent({ key: conversationKey, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf }) {
+    if (localBackendGuarded()) return undefined;
     try {
       const text = String(plainContent || textContent || '').trim();
       if (!text || text.startsWith('/')) return;
@@ -14478,6 +14528,7 @@ async function main() {
 
   // 她自己的发言：写进记忆 inbox；插件会尽量并进最近一条主人记录（一问一答）。
   function recordSelfMemoryEvent(key, text) {
+    if (localBackendGuarded()) return undefined;
     try {
       const body = String(text ?? '').trim();
       if (!body) return;
@@ -14524,6 +14575,7 @@ async function main() {
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
+    await localChannels.incoming(key, event, plainContent);
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
@@ -15366,6 +15418,7 @@ async function main() {
         for await (const envelope of api.events.mux({})) {
           framesThisStream += 1;
           const frame = envelope.payload;
+          localChannels.enterSession(frame.sessionId);
           // 会话开场快照：只喂 token 账本。它含**历史** turn/end，绝不能让它们走
           // session/event 通道 —— 否则桥接会把早已结束的回合当成新回合去发 QQ 回复。
           if (frame.type === 'session/snapshot') {
@@ -15875,16 +15928,20 @@ async function main() {
     reconnect: true
   });
 
+  for (const [method, kind] of [['sendPrivateMessage', 'private'], ['sendGroupMessage', 'group']]) {
+    const deliver = bot[method].bind(bot);
+    bot[method] = (id, ...args) => localChannels.send(`${kind}:${id}`, () => deliver(id, ...args));
+  }
   bot.onPrivateMessage(async (event) => {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
     // 用 `===` 漏掉自己发的消息会进入正常处理（reserved2 下 AI 会回答自己 / chat 下可能回复循环）。
     if (String(event?.user_id ?? '') === String(event?.self_id ?? '')) return;
-    try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
+    try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { appendActivity(`[local-channel] ${error?.code || 'CHANNEL_REQUEST_FAILED'}: ${error?.message ?? error}；${error?.hint || '检查渠道状态后重试。'}`); log('处理私聊消息出错:', error?.message ?? error); }
   });
   bot.onGroupMessage(async (event) => {
     if (String(event?.sender?.user_id ?? '') === String(event?.self_id ?? '')
       || String(event?.user_id ?? '') === String(event?.self_id ?? '')) return;
-    try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
+    try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { appendActivity(`[local-channel] ${error?.code || 'CHANNEL_REQUEST_FAILED'}: ${error?.message ?? error}；${error?.hint || '检查渠道状态后重试。'}`); log('处理群消息出错:', error?.message ?? error); }
   });
   bot.onNotice('notify', async (event) => {
     try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }

@@ -4805,6 +4805,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       };
       const status = data?.status ?? overview?.memory ?? {};
       return h("div", null,
+        h("div", { className: "qbw-group" }, h("h3", null, "本地记忆管理"), h("p", null, "按角色管理受众、来源、修订、纠错、删除和迁移演练。"), h("a", { href: "/dsh-surfcore/local-capabilities", target: "_blank", rel: "noopener" }, "打开本地记忆管理")),
         h(MemoryCardPanel, { view: "summary", data: card, reload: loadCard, busy, setBusy, toast, unified, setUnified, onChanged: () => setFullVersion((v) => v + 1) }),
         h("div", { className: "qbw-group" }, "双向脱敏同步（QQ ⇄ B站）", h("small", null, "只搬运公开、脱敏后的近况；和上面的记忆卡不是一回事")),
         h("div", { className: "qbw-dangerbox" },

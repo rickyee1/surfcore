@@ -10,6 +10,7 @@
  *
  * 只有本模块写记忆卡（单进程内用 promise 链串行化）；桥接只 append 不写卡，避免并发覆盖。
  */
+import { localBackendGuarded } from '../../../src/local-capabilities-state.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BACKUP_DIR, QQ_STATE_DIR, maskPath } from './paths.js';
@@ -272,6 +273,7 @@ export function fullMemoryCardSnapshot({ q = '', limit = 40, config = memoryCard
 /** 真正跑一次维护；并发调用会排队，不会互相覆盖。 */
 export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCardConfig(), now = Date.now() } = {}) {
   return serialize(async () => {
+    if (localBackendGuarded()) return { ok: true, disabled: true, backend: 'local' };
     if (config.enabled === false) {
       // 关掉记忆卡时要清空注入块：桥接只认文件，留着旧文件等于「设置关了但提示词还在」。
       try { writeTextAtomic(pathsNow().promptQq, ''); } catch {}
@@ -428,6 +430,7 @@ export function restoreMemoryCardBackup(name, { config = memoryCardConfig(), now
 
 /** B站调度器 / 调试用：读现成的 B站 注入块（mtime 缓存，避免每次重复读盘）。 */
 export function memoryCardPromptBlock(platform = 'bili') {
+  if (localBackendGuarded()) return '';
   const paths = pathsNow();
   const file = platform === 'bili' ? paths.promptBili : paths.promptQq;
   const cacheKey = `${platform}:${paths.dir}`;

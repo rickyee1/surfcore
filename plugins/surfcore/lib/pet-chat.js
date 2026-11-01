@@ -16,6 +16,8 @@
  *   合成后的 wav 落在 ~/.dsh/surfcore/pet/voice/，通过 pet-api 的 /audio/<key>.wav 回给桌宠播放。
  *   气泡永远显示文字（语音只是附加），合成失败也照常返回文字。
  */
+import { localCapabilities } from './local-capabilities/host.js';
+import { errorResult } from './local-capabilities/supervisor.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -153,7 +155,9 @@ function tokenHash(text) {
  * @param {(msg:string, ...args:any[])=>void} [opts.pluginLog]
  * @param {object} [opts.tokenBudget]  每日额度服务（可选，冒烟测试可不传）
  */
-export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null } = {}) {
+export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null, capabilities = null } = {}) {
+  const local = capabilities || localCapabilities();
+  const petChannel = { kind: 'pet' };
   const root = path.join(stateDir, 'pet');
   const chatDir = path.join(root, 'chat');
   const voiceDir = path.join(root, 'voice');
@@ -283,6 +287,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   function memoryBlock() {
+    if (local.guarded) return '';
     const unified = unifiedConfig();
     if (unified?.memoryCard?.enabled === false) return '';
     try { return String(memoryCardPromptBlock('qq') || '').trim(); } catch { return ''; }
@@ -301,6 +306,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   /** 目的状态里的「惦记着的事」：让桌宠聊天接得上她最近的心思，而不是每次从零开始。 */
   function purposeBackground() {
+    if (local.guarded) return { pending: [], goals: [], emotion: '' };
     const state = readJson(purposeStateFile(), null);
     if (!state || typeof state !== 'object') return { pending: [], lastPurpose: '', emotion: '' };
     const pending = (Array.isArray(state.pending) ? state.pending : [])
@@ -341,7 +347,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   function readHistory() {
-    const raw = readJson(historyFile(), null);
+    // Local memory is the only authority. Old plaintext history cannot revive deleted context.
+    const raw = local.guarded ? null : readJson(historyFile(), null);
     const messages = Array.isArray(raw?.messages) ? raw.messages : [];
     return {
       version: 1,
@@ -354,6 +361,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   function saveHistory(history) {
+    if (local.guarded) return;
     ensureDirs();
     try {
       writeJsonAtomic(historyFile(), {
@@ -426,6 +434,11 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   function setFocus(enabled, source = 'api') {
+    if (local.guarded) return local.management('attention.configure', { focused: enabled === true }).then(() => applyFocus(enabled, source));
+    return applyFocus(enabled, source);
+  }
+
+  function applyFocus(enabled, source = 'api') {
     ensureDirs();
     const state = {
       enabled: enabled === true,
@@ -491,7 +504,40 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       };
     }
     while (true) {
-      const fresh = events.filter((e) => e.id > known);
+      let fresh = events.filter((e) => e.id > known);
+      {
+        const valid = [];
+        for (const event of fresh) {
+          if (!event.localContext) {
+            if (event.type !== 'proactive' || !local.guarded) valid.push(event);
+            continue;
+          }
+          // Claim synchronously before any await. A second poll cannot release the same event.
+          // Keep the claim even if the delivery/finalization outcome becomes unknown.
+          if (event.delivered) continue;
+          event.delivered = true;
+          try {
+            // Validate captured provenance even if the new character uses the legacy backend.
+            await local.validate(event.localContext);
+            if (event.type === 'proactive') {
+              if (!event.outreach) continue;
+              const check = await local.supervisor.raw('attention.check', event.localContext.binding, { outreach_id: event.outreach.id, reservation_id: event.outreach.reservation_id, memory_epoch: event.localContext.memory_epoch });
+              if (!check.allowed || focusEnabled()) {
+                await local.supervisor.raw('attention.finalize', event.localContext.binding, { outreach_id: event.outreach.id, outcome: 'failed' });
+                continue;
+              }
+              // HTTP delivery can become unknown; account before releasing bytes, never replay.
+              await local.supervisor.raw('attention.finalize', event.localContext.binding, { outreach_id: event.outreach.id, outcome: 'unknown' });
+            }
+            valid.push(event);
+          } catch {
+            if (event.outreach) {
+              try { await local.supervisor.raw('attention.finalize', event.localContext.binding, { outreach_id: event.outreach.id, outcome: 'failed' }); } catch {}
+            }
+          }
+        }
+        fresh = valid;
+      }
       if (fresh.length) {
         const last = fresh[fresh.length - 1].id;
         return {
@@ -746,10 +792,13 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
     inFlight += 1;
     const startedAt = Date.now();
+    let localContext;
+    try { if (local.guarded) { localContext = await local.context(petChannel, say); await local.call(petChannel, 'attention.respond'); } }
+    catch (e) { inFlight -= 1; return errorResult(e); }
     const history = readHistory();
     const role = roleInfo();
     const owner = ownerInfo();
-    const system = buildChatSystemPrompt({ role, owner, memory: memoryBlock(), purpose: purposeBackground(), modality: mode });
+    const system = buildChatSystemPrompt({ role, owner, memory: localContext ? localContext.text : memoryBlock(), purpose: purposeBackground(), modality: mode });
     const user = [
       history.messages.length ? '【最近聊天】' : '',
       history.messages.length ? formatHistory(history, s.chat.historyTurns, say, owner.name) : say,
@@ -779,12 +828,21 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
           aiMessage.spokenText = tts.text;
         }
       }
+      if (local.guarded && !localContext) throw Object.assign(new Error('后端已切换，本次旧回复已取消。'), { code: 'STALE_CONTEXT' });
+      let localRemembered = false;
+      if (localContext) {
+        await local.validate(localContext);
+        const saved = await local.ingest(localContext, `pet:${crypto.randomUUID()}`, say);
+        // Use only this transaction's epoch; never refresh over a concurrent correction.
+        await local.validate({ ...localContext, memory_epoch: saved.memory_epoch });
+        localRemembered = !saved.skipped;
+      }
       appendMessage(history, userMessage);
       appendMessage(history, aiMessage);
       history.lastUserAt = now;
       history.lastAssistantAt = now;
       saveHistory(history);
-      const remembered = rememberEvents(buildPetMemoryEvents({
+      const remembered = localContext ? (localRemembered ? 1 : 0) : rememberEvents(buildPetMemoryEvents({
         userText: say,
         replyText: reply,
         at: now,
@@ -802,14 +860,15 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       };
     } catch (error) {
       lastError = String(error?.message ?? error).slice(0, 200);
-      return { ok: false, error: lastError };
+      return localContext || local.guarded ? errorResult(error) : { ok: false, error: lastError };
     } finally {
       inFlight = Math.max(0, inFlight - 1);
     }
   }
 
   /** 主动搭话：文字/语音两条路都一样——先入历史，再发事件；语音合成失败只降级成文字。 */
-  async function proactive({ text, modality = 'text', purpose = null } = {}) {
+  async function proactive({ text, modality = 'text', purpose = null, localContext = null, outreach = null } = {}) {
+    if (local.guarded && (!localContext || !outreach)) return { ok: false, code: 'PERMISSION_DENIED', error: '主动消息缺少有效预留。', hint: '通过主动联系调度器重试。' };
     const s = settings();
     const raw = String(text ?? '').trim();
     if (!raw) return { ok: false, error: '没有内容' };
@@ -827,11 +886,16 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         message.spokenText = tts.text;
       }
     }
+    if (localContext) {
+      await local.validate(localContext);
+      const check = await local.supervisor.raw('attention.check', localContext.binding, { outreach_id: outreach.id, reservation_id: outreach.reservation_id, memory_epoch: localContext.memory_epoch });
+      if (!check.allowed) return { ok: false, code: 'PERMISSION_DENIED', error: `主动联系受限：${check.reason}`, hint: '检查注意力设置。' };
+    }
     appendMessage(history, message);
     history.lastProactiveAt = now;
     history.lastAssistantAt = now;
     saveHistory(history);
-    const remembered = rememberEvents(buildPetMemoryEvents({
+    const remembered = localContext ? 0 : rememberEvents(buildPetMemoryEvents({
       replyText: body,
       at: now,
       roleName: roleInfo().name,
@@ -839,6 +903,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     lastProactiveAt = now;
     emit({
       type: 'proactive',
+      localContext,
+      outreach,
       text: body,
       modality: mode,
       audioKey: message.audioKey || '',
@@ -910,6 +976,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   return {
+    localCapabilities: local,
     token,
     settings,
     status,

@@ -367,6 +367,8 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 
 ## 九、开发
 
+路遥融合分支增加了[本地记忆管理与部署说明](docs/LOCAL_CAPABILITIES.md)，`npm run dev:local-memory` 启动隔离管理页；平台验收边界见该文档。
+
 ```bash
 npm run test:audit              # 默认门禁（75 个脚本，离线）
 npm run test:regressions        # 桥接/协议回归

@@ -1,5 +1,7 @@
 # 路线图与路线守则（ROADMAP）
 
+> 2026-11-02 fork：按用户方案实施本地能力服务及M0–M2接线，SurfCore保持唯一聊天编排。范围与未完成项见[LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。用户已授权保存到其fork，不包含上游发布、tag或Release。
+
 > 本文件是「做什么、按什么顺序做、什么时候该放弃」的唯一权威。**改路线先改这里**，再动代码。
 > 配套：开工动线见 [`../AGENTS.md`](../AGENTS.md)，踩坑见 [`PITFALLS.md`](PITFALLS.md)，交接见 [`HANDOFF.md`](HANDOFF.md)。
 

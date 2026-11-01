@@ -15,6 +15,10 @@
  *   · 读配置脱敏（********），保存时 ******** 表示保持原值；
  *   · 每次写文件前备份到 ~/.dsh/surfcore/backups/。
  */
+import { LOCAL_ROOT } from '../../../src/local-capabilities-state.js';
+import { createChannelHandler } from './local-capabilities/channel.js';
+import { localCapabilities, disposeLocalCapabilities } from './local-capabilities/host.js';
+import { createManagementHandler } from './local-capabilities/management.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -701,6 +705,12 @@ export function apply(ctx) {
       },
     }));
   }
+
+  const local = localCapabilities();
+  const localChannel = createChannelHandler({ capabilities: local, keyFile: path.join(LOCAL_ROOT, 'channel.key') });
+  const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
+  route('exact', '/dsh-surfcore/local-capabilities', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/api', localManagement);
 
   // ── 概览 ────────────────────────────────────────────────────────────────
   async function overview() {
@@ -2253,7 +2263,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
       const body = JSON.parse((await readBody(req)) || '{}');
       if (suffix === '/config') { json(res, 200, { ok: true, ...petService.configure(body) }); return; }
       if (suffix === '/focus') {
-        const state = petChat.setFocus(body.enabled === true, body.source || 'settings');
+        const state = await petChat.setFocus(body.enabled === true, body.source || 'settings');
         json(res, 200, { ok: true, focus: state });
         return;
       }
@@ -3303,6 +3313,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
   route('prefix', API_PREFIX, async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
+    if (local.guarded && /^\/dsh-surfcore\/api\/memory(?:-card)?(?:\/|$)/.test(pathname)) { json(res, 409, { ok: false, code: 'PERMISSION_DENIED', error: '当前角色由本地记忆服务管理。', hint: '打开记忆页顶部的本地记忆管理入口。' }); return; }
+    if (pathname === `${API_PREFIX}/local-capabilities/channel`) { await localChannel(req, res); return; }
     if (pathname === `${API_PREFIX}/overview`) { json(res, 200, await overview()); return; }
     if (pathname === `${API_PREFIX}/config`) { await handleConfig(req, res); return; }
     if (pathname === `${API_PREFIX}/characters`) { await handleCharacters(req, res, url); return; }
@@ -3458,6 +3470,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     try { scheduler?.stop?.(); } catch {}
     try { updates.dispose(); } catch {}
     try { petPurpose.stop?.(); } catch {}
+    void disposeLocalCapabilities();
     if (petHostTimer) clearInterval(petHostTimer);
     try { sessionEventOff?.(); } catch {}
     try { billing.dispose(); } catch {}

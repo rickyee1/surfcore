@@ -167,7 +167,7 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
     if (req.method === 'POST' && suffix === '/focus') {
       let body = {};
       try { body = JSON.parse((await readBody(req, PET_BODY_LIMIT)) || '{}'); } catch {}
-      const state = chat.setFocus(body.enabled === true, body.source || 'pet');
+      const state = await chat.setFocus(body.enabled === true, body.source || 'pet');
       json(res, 200, { ok: true, focus: state });
       return;
     }
