@@ -6,6 +6,9 @@ const fail = (code, error, hint = '核对当前 DSH 模型配置后重新发起�
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const EVENTS = ['loader/volatile-update', 'settings/document-updated', 'llm/adapters-updated', 'credentials/reference-updated'];
 const textLength = value => Array.from(value).length;
+// Cordis get() returns a fresh context facade. Unwrap only for identity checks;
+// all service methods must still run through the original caller's facade.
+const identityOf = service => service?.[Symbol.for('cordis.original')] ?? service;
 
 /** Matches the reviewed DeepSeek Messages adapter, not an assumed OpenAI URL. */
 export function messagesEndpoint(baseURL) {
@@ -30,6 +33,9 @@ export function createFixedModel({ ctx, timeoutMs = 45000, onInvalidate = () => 
     const dispose = ctx?.on?.(name, invalidate);
     if (typeof dispose === 'function') off.push(dispose);
   }
+  // A service can be revoked and restored with the same underlying object.
+  const serviceOff = ctx?.on?.('internal/service', name => { if (name === 'llm') invalidate(); });
+  if (typeof serviceOff === 'function') off.push(serviceOff);
   function snapshot() {
     if (disposed) throw fail('FIXED_MODEL_STALE', '固定模型宿主已退出。');
     const selected = ctx?.get('agentDefaultModel')?.currentSelection?.();
@@ -58,7 +64,7 @@ export function createFixedModel({ ctx, timeoutMs = 45000, onInvalidate = () => 
     const baseURL = value?.baseURL ?? inheritedBase ?? 'https://api.deepseek.com/anthropic';
     const endpoint = messagesEndpoint(baseURL);
     const identity = { provider: selected.provider, model: selected.model, namespace: route.settingsNs, path: route.settingsPath, revision: entries[0].revision, endpoint };
-    return { llm, identity, fingerprint: digest(JSON.stringify(identity)), generation };
+    return { llm, llmIdentity: identityOf(llm), identity, fingerprint: digest(JSON.stringify(identity)), generation };
   }
   function pin({ signal } = {}) {
     const initial = snapshot(); const pinnedGeneration = generation;
@@ -66,7 +72,7 @@ export function createFixedModel({ ctx, timeoutMs = 45000, onInvalidate = () => 
     function validate() {
       if (signal?.aborted || disposed || generation !== pinnedGeneration) throw fail('FIXED_MODEL_STALE', '模型配置或原请求已变化，旧交付已取消。');
       const current = snapshot();
-      if (generation !== pinnedGeneration || current.fingerprint !== initial.fingerprint || current.llm !== initial.llm) throw fail('FIXED_MODEL_STALE', '模型目标已经变化，不能给旧结果重新选模型。');
+      if (generation !== pinnedGeneration || current.fingerprint !== initial.fingerprint || current.llmIdentity !== initial.llmIdentity) throw fail('FIXED_MODEL_STALE', '模型目标已经变化，不能给旧结果重新选模型。');
       return target;
     }
     async function prepare({ maxTokens = 1600, temperature = 0.2 } = {}) {

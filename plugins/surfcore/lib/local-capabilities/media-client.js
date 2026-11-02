@@ -23,8 +23,8 @@ export function mountMediaClient({ document: d, fetch: request, base, token, set
   async function refresh() {
     const value = await api('status');
     el('enabled').checked = value.enabled; el('provider').value = value.output_provider;
-    el('model').textContent = JSON.stringify({ role: value.character, model: value.current_model, image: value.image_hint }, null, 2);
-    el('status').textContent = JSON.stringify({ enabled: value.enabled, output_owner: value.output_owner, pending: value.pending, physical_test: value.physical_test, fault: value.fault, legacy_playback_suppressed: value.legacy_playback_suppressed, legacy_pause_confirmed: value.legacy_pause_confirmed, memory_projection: value.memory_projection }, null, 2);
+    el('model').textContent = `当前角色：${value.character}\n当前模型：${value.current_model?.provider || '未选择'} / ${value.current_model?.model || '未选择'}\n窗口画面问答：准备窗口用途时会核对实际读图能力；未准备不代表模型不支持。`;
+    el('status').textContent = `设备功能：${value.enabled ? '已允许，启动设备仍需确认' : '已关闭'}\n待处理回复：${value.pending || 0}\n桌宠原声音：${value.legacy_playback_suppressed ? (value.legacy_pause_confirmed ? '已确认停止' : '等待停止确认，本地声音暂不可启动') : '沿用已有设置'}\n设备故障：${value.fault || '无'}\n当前页面许可：${value.leases?.length || 0} 项`;
     if (value.lastError) showError(value.lastError);
     if (lease) {
       const current = value.leases.find(item => item.lease_id === lease.lease_id);

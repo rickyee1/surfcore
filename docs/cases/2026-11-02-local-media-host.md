@@ -71,3 +71,8 @@
 证据：f1-before/f2-before先红；f1-after 5、SDK15、native-late7、preload12及受影响回归，完整命令/结果本批日志。
 回滚：先停媒体，整体恢复备份/移除隔离preload，不重放旧许可或未知收据。
 ```
+
+
+## 2026-11-02 部署显示修正
+
+实际状态页尚未执行模型 prepare，不能把默认 false 当作已确认不支持图片。状态 current_model.image_capable 现为 null；真正准备窗口仍检查原 prepared 模型能力和已审 SDK 协议。主会话只将模型/设备状态改为可读文字，不改授权、采集或发送。已有 DOM 检查及媒体宿主24项通过，独立限定复核 PASS。实际设备和当前模型图片请求仍须另验。
