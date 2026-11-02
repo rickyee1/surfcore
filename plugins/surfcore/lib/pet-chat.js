@@ -17,7 +17,7 @@
  *   气泡永远显示文字（语音只是附加），合成失败也照常返回文字。
  */
 import { localCapabilities } from './local-capabilities/host.js';
-import { errorResult } from './local-capabilities/supervisor.js';
+import { CapabilityError, errorResult } from './local-capabilities/supervisor.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -35,6 +35,19 @@ const ONE_SECOND = 1000;
 const MAX_INPUT_CHARS = 1200;
 const MAX_HISTORY_MESSAGES = 200;
 const EVENT_LIMIT = 200;
+
+/** Classify only errors from the model-call boundary; never expose provider text. */
+function modelErrorResult(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const status = Number(error?.status ?? error?.statusCode);
+  const message = String(error?.message || '');
+  const needsAuth = status === 401 || status === 403
+    || /^(?:authentication_error|invalid_api_key|missing_api_key|unauthorized|auth_required)$/.test(code)
+    || /\b(?:no|missing|invalid)\s+api[ _-]?key\b|\bapi[ _-]?key\s+(?:is\s+)?(?:missing|not configured|invalid)\b/i.test(message);
+  return needsAuth
+    ? { ok: false, code: 'MODEL_AUTH_REQUIRED', error: 'DSH 模型凭据缺失或不可用。', hint: '打开 DSH 设置 → 模型，为当前供应商配置凭据并保存后重试。' }
+    : { ok: false, code: 'MODEL_UNAVAILABLE', error: 'DSH 模型服务调用失败。', hint: '打开 DSH 设置 → 模型，检查默认模型、供应商连接与服务状态后重试。' };
+}
 
 function readJson(file, fallback = null) {
   try {
@@ -698,10 +711,11 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         }
         return { text, usage, model: target.model };
       } catch (error) {
+        if (error instanceof CapabilityError) throw error;
         lastFailure = error;
         // 只有「一个字都没吐出来」才换档重试，避免重复计费/半截回复。
         if (text) throw error;
-        pluginLog(`[pet-chat] 模型调用失败（effort=${effort || '默认'}）：`, String(error?.message ?? error).slice(0, 160));
+        pluginLog(`[pet-chat] 模型调用失败（effort=${effort || '默认'}）：`, modelErrorResult(error).code);
       }
     }
     throw lastFailure || new Error('模型调用失败');
@@ -782,7 +796,11 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const say = String(text ?? '').trim().slice(0, MAX_INPUT_CHARS);
     if (!say) return { ok: false, error: '说点什么吧' };
     const mode = modality === 'voice' ? 'voice' : 'text';
-    if (!llmReady()) return { ok: false, error: 'DSH 模型服务还没就绪，稍后再试' };
+    if (!llmReady()) {
+      const failure = modelErrorResult();
+      lastError = failure.error;
+      return failure;
+    }
     if (tokenBudget?.block) {
       try {
         const gate = await tokenBudget.block('other');
@@ -794,7 +812,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const startedAt = Date.now();
     let localContext;
     try { if (local.guarded) { localContext = await local.context(petChannel, say); await local.call(petChannel, 'attention.respond'); } }
-    catch (e) { inFlight -= 1; return errorResult(e); }
+    catch (e) { inFlight -= 1; const failure = errorResult(e); lastError = failure.error; return failure; }
     const history = readHistory();
     const role = roleInfo();
     const owner = ownerInfo();
@@ -806,12 +824,20 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     ].filter(Boolean).join('\n');
 
     try {
-      const result = await complete({
-        system,
-        user,
-        maxTokens: mode === 'voice' ? 400 : 700,
-        temperature: s.chat.temperature,
-      });
+      let result;
+      try {
+        result = await complete({
+          system,
+          user,
+          maxTokens: mode === 'voice' ? 400 : 700,
+          temperature: s.chat.temperature,
+        });
+      } catch (error) {
+        if (error instanceof CapabilityError) throw error;
+        const failure = modelErrorResult(error);
+        lastError = failure.error;
+        return failure;
+      }
       recordUsage(result.usage, result.model);
       let reply = cleanReply(result.text);
       if (!reply) return { ok: false, error: '她这次没说话（模型返回空）' };
@@ -859,8 +885,9 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         voice: aiMessage.audioKey ? { ok: true, key: aiMessage.audioKey } : (mode === 'voice' ? { ok: false, error: lastError || '语音合成失败，已用文字回复' } : null),
       };
     } catch (error) {
-      lastError = String(error?.message ?? error).slice(0, 200);
-      return localContext || local.guarded ? errorResult(error) : { ok: false, error: lastError };
+      const failure = localContext || local.guarded ? errorResult(error) : { ok: false, error: String(error?.message ?? error).slice(0, 200) };
+      lastError = failure.error;
+      return failure;
     } finally {
       inFlight = Math.max(0, inFlight - 1);
     }

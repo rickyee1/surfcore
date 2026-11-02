@@ -4,6 +4,8 @@
 
 新分支实现加密本地能力服务、管理页和QQ/桌宠适配；部署使用隔离DSH_HOME与测试角色。上游基线59ec3066，版本仍0.8.6。最终验证和未完成范围见[cases/2026-11-02-local-capabilities.md](cases/2026-11-02-local-capabilities.md)，使用见[LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。真实QQ、surfpet及模型对照尚未验收，B站自主发送明确暂停；不把本次当完整M2发布。
 
+同日追加本地部署验收：提供 `scripts/local-deployment.ps1` 管理隔离实例；实际 DSH 管理接口 19 项通过，真实模型调用发现缺 API Key，已修正为 `MODEL_AUTH_REQUIRED` 并指向模型设置。用户已在本机配置 DeepSeek API，真实回复及记忆纠正/删除联调通过。进程生命周期、数据持久化和本轮回归证据见 [部署记录](cases/2026-11-02-local-deployment.md)。
+
 > 给「半天后的我」和接手的人：**现在做到哪、什么没验证、下一步按什么顺序做**。
 > 每次开工先读这里，收工前更新这里。时间一律写本地时间（Asia/Shanghai）。
 

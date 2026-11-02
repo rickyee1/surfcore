@@ -17,6 +17,20 @@ npm run dev:local-memory
 
 DSH 内使用设置中的本地记忆入口。先按原安装文档安装 SurfCore；host/client 变更后重启所用 DSH profile，桥接代码变更也需重启桥接。隔离安装可将 `DSH_HOME` 指向本仓库 `.local/dsh`，运行 `node scripts/setup-dsh.mjs web`，再用已安装 DSH 的 CLI 启动 `--profile web --host 127.0.0.1 --port 3211 --no-open`。首次访问使用 DSH 自己生成的本机登录入口，认证信息不放进共享文档。
 
+已准备好上述隔离环境后，可用 PowerShell 7 管理两个服务：
+
+```powershell
+# 首次提供本机已安装的 DSH CLI；路径仅保存在忽略提交的 .local 中。
+pwsh -NoProfile -File scripts/local-deployment.ps1 start -DshCli '<DSH 安装目录>\resources\runtime\cli\bin\dsh.cmd' -OpenBrowser
+pwsh -NoProfile -File scripts/local-deployment.ps1 status
+pwsh -NoProfile -File scripts/local-deployment.ps1 restart
+pwsh -NoProfile -File scripts/local-deployment.ps1 stop
+```
+
+默认地址为记忆管理页 `http://127.0.0.1:3210/local-capabilities` 和 DSH `http://127.0.0.1:3211`。DSH 需要登录会话，`-OpenBrowser` 让官方 CLI 启动时打开本机登录页面；已运行时可用 `restart -OpenBrowser`。脚本只管理自身记录且身份匹配的进程，遇到其他进程占用端口会给出错误与处理提示。停止保留数据库、配置和日志。详见[部署记录](cases/2026-11-02-local-deployment.md)。
+
+隔离 DSH 使用自己的模型配置。真实聊天前，在 DSH 的模型页面为 `deepseek-official` 配置 DeepSeek API Key 并保存，选择可用的默认模型。密钥仅填本机设置页。缺失或拒绝凭据时聊天返回 `MODEL_AUTH_REQUIRED`，其他模型调用故障返回 `MODEL_UNAVAILABLE`；本地记忆故障保持独立的错误提示。管理页健康检查通过只代表本地能力服务可用，不能证明模型或 QQ 已连通。
+
 ## 使用与数据范围
 
 - 按角色保存后端：`legacy` 沿用原版，`shadow` 仅演练，`local` 使用新服务，`paused` 停用。正式本地写入后只允许暂停，不自动切回旧库。
