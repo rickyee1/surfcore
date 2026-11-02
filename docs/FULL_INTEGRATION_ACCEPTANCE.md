@@ -1,6 +1,6 @@
 # SurfCore × 路遥融合验收矩阵
 
-事实截点：2026-11-02，Asia/Shanghai。**整体尚未验收通过；真实部署仍为 `e9d33b481025b73e8398b0d76548413ab35b3aa8`。** 本文只汇编已存在的证据，不启动测试、服务、模型、平台或设备，也不增加实现需求。后续结果由主会话逐项更新。
+事实截点：2026-11-03，Asia/Shanghai。**整体尚未验收通过；真实部署为 `9f456d24b3165773b805879a5d59912a1e6af1e2`。** 本文只汇编已存在的证据，不启动测试、服务、模型、平台或设备，也不增加实现需求。未接受的semantic/T1/P1工作区修改不属于运行版本。
 
 要求来源：[原方案第 11–12 节](../../luyao_companion_v0_1/docs/SURFCORE_LUYAO_INTEGRATION_PLAN.md)、[本仓工作副本](../.ai-work/luyao-integration/source-plan.md)、[完整执行单](FULL_INTEGRATION_EXECUTION.md)；当前任务状态参考 [本机状态记录](../.local/evidence/full-integration/state.json)。执行单/状态记录用于定位，具体通过结论以对应版本的独立评审、冻结清单和实际结果为准。历史 case 中的“待独立复核”不推翻其后已记录的限定 PASS；旧部署的实测也不能升级为新版本通过。
 
@@ -11,7 +11,26 @@
 - 恢复层的“隔离通”指合成数据的重启、故障或中断演练；不包括真实用户库升级、跨设备搬迁、物理断电或磁盘损坏。设备层包括麦克风、扬声器、窗口采集及适用的实际锁屏/热拔插。
 - ignored 证据链接只在本机可用，不随仓库发布；本文不复制账号、凭据、消息正文或私密日志。各结果只覆盖其冻结版本，合并后仍需最终门禁及适用实测。
 
-## M0–M5 退出条件
+## 11月3日当前结果（覆盖下方11月2日历史检查点）
+
+完整链路、机制、取舍、回滚与失败分母见[实测case](cases/2026-11-03-full-integration-live-results.md)。旧矩阵保留历史含义，不能把其“待部署/未启动”当作最新状态，也不能把旧代码PASS扩大为新反例通过。
+
+| 项目 | 当前结论 | 仍未完成 |
+| --- | --- | --- |
+| 部署/升级 M0/M5、A10–A11 | 9f实际部署；用户DPAPI/SQLCipher升级、摘要保持和重启通过；9f audit108/108、regressions16、manifest725 | 未接受源码不能重启加载；后续版本需最终冻结与验证 |
+| A01 | **FAIL**：全120次、115完成/5超时、双盲360评分；融合版A01-25-r2与A01-28-r1漏答硬失败；40参数一致性失败 | 参数差异未归因，不能把原始15/30当有效受控版本比较；原失败全保留 |
+| M1 / A02–A04 | 真实Writer消费1条、认知提案0；CPU索引12/12重建、查询通过。P1元数据attempt2功能独立通过，112相关检查；A01原生隔离受众测试已纳入完整批次 | 真实提案质量、纠正/删除/恢复后输出尚未完整覆盖；P1尚未接JS/部署 |
+| M2 / A05–A07 | QQ/Pet真实共享合成记忆召回成功（预热后3秒）。原quiet/预算隔离证据仍有效 | semantic-host3紧停与时限反例、T1追加4桥接重启反例FAIL；完整purpose与单载体接线缺失，主动发送关闭 |
+| M3 / A08–A09 | 实际时间工具与合成文件经确认→固定模型→原生桌宠sent；过期确认拒绝；便签创建/读取local_only | Explorer、实锁屏未验；一种自然说法未命中分类器限制保留 |
+| M4 / A13 | 原生补丁已应用，Flash图像请求前提核查通过 | 用户暂停实际麦克风/扬声器/窗口测试，media关闭，无实际图像回答或硬件PASS |
+| M5角色包 | 浏览器实际加密包下载、认证二进制上传及同ID预览通过；new冲突拒绝 | 浏览器选择器受扩展许可限制；未stage/commit用户库恢复、未验证第二台物理电脑 |
+| 连续运行 / A12 | **观察已完成**：2h/121样本，三个监听进程无重启；记忆/QQ121/121，DSH页面120/121（一次401）；20分钟空闲观测0模型调用 | DSH业务RPC不支持，业务健康unknown；2h不等于24h，不接受dirty改动，不代表全部模型调用账单 |
+
+本机证据入口：[A01结果](../.local/evidence/full-integration/a01-final-results.json)、[盲评理由摘录](../.local/evidence/full-integration/a01-rationale-excerpts.md)、[两小时结果](../.local/evidence/full-integration/observer-two-hour-result.json)、[当前状态](../.local/evidence/full-integration/state.json)。具体工具、平台、角色包证据见实测case。
+
+当前阻塞：semantic-host3与T1追加4的自动修补次数均已耗尽，上限豁免等待用户明确回答；没有自动重复失败尝试。P1是完整purpose所需的新素材元数据，attempt2功能独立PASS，不重置旧计数，P2单协调器完整接线尚未实现。一次夜间公开内容私聊测试仍未使用；每天4次/90分钟/quiet保留，取消30分钟闲置门槛的修改未部署。P1保存的补丁与采用模块一致性已核，但原生逐编辑调用轨迹仍NOT_VERIFIED；不冒充已验证的宿主归属。
+
+## 11月2日历史检查点：M0–M5 退出条件
 
 | 阶段 | 代码层 | 模型层 | 平台层 | 设备层 | 恢复层 | 连续运行层 / 当前退出结论 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -22,7 +41,7 @@
 | M4 按键转写、单输出、免提与窗口 | T4-P attempt3、preload 与 T4-H attempt2 独立通（E08–E09） | ASR/VAD 公共 wav、KWS 加载/AEC 静音帧预检通；媒体实际模型请求待验 | 已安装原生 pet 整链路待验 | **实际设备 0**；无麦克风/播放/窗口/实锁屏通过结论 | 后端撤权、晚输出、expiry/COMMIT/native-open 隔离通；宿主修补已独立放行，实机待验 | 待；**代码通过，实机未退出** |
 | M5 备份、角色包、升级与诊断 | T2a 与 T5 attempt2 独立通，后者专项 51 项（E02、E10） | 资产存在/固定哈希及依赖清单已记录；不等于所有运行效果通过（E11） | 浏览器真实选文件/保存、用户升级及跨设备迁移待验 | 设备许可不迁移，须重新授权/实测 | SQLCipher/Windows DPAPI 历史 Store、断点重启、包完整性/删除优先隔离通；真实升级待验 | 2h 未启动；**未退出** |
 
-## A01–A13 逐项矩阵
+## 11月2日历史检查点：A01–A13 逐项矩阵
 
 每行的“待”均保留在原验收范围内；未完成项不从分母删除。六层不能互相替代。
 
@@ -42,7 +61,7 @@
 | A12 启动/空闲/停用，无第二聊天/整理循环 | 通：唯一编排、事件驱动 Writer、惰性语义 worker、停用/取消 | 确定性无闲置模型调用通；新部署空闲遥测待 | 待：实际宿主/桥接/能力子进程收敛 | 待：实际设备 worker 退出 | 隔离通：父退出、重启、任务/队列失效 | **待：observer v2 仅 once，2h 未启动** | E01、E03–E04、E08、E12 |
 | A13 真实语音多轮与屏幕撤权 | T4-P/preload/T4-H attempt2 独立通 | 仅离线 ASR/VAD 与 KWS/AEC 预检；当前选择模型/同帧实际请求待 | 待：已安装 pet 的单输出 ACK/实际呈现 | **0：识别、播放、打断、回声/误唤醒、窗口/撤权均未实机验收** | 合成设备的后端取消/TTL 通；不代替实锁屏/热拔插 | 待观察 | E08–E09、E11 |
 
-## 可核对证据索引
+## 11月2日历史证据索引（新增结果见上）
 
 | ID | case / 固定范围 | ignored 证据入口与解释 |
 | --- | --- | --- |
@@ -61,7 +80,7 @@
 | E12 | 连续运行计划（没有完成结论） | [observer v2 计划](../.local/evidence/full-integration/observer/plan.json)、[v2 冻结/once 结果](../.local/evidence/full-integration/observer/freeze-v2.json)。预定 7200 秒、60 秒间隔、121 端点样本；前 20 分钟计划空闲，后段负载须另记录；**未启动 2h**。once 为 HTTP 可用性，3211 RPC `supported=false/404`，`businessHealthy=null`；不推断业务失败或成功。2h 本身也不是 24h 稳定性证据。 |
 | E13 | [模型失败提示](cases/2026-11-02-local-deployment.md)、[安装完成状态](cases/2026-11-02-voice-install-completion.md)、[导入失败回滚时序](cases/2026-11-02-voice-import-failure-order.md)、[更新复制同元数据](cases/2026-11-02-update-copy-same-metadata.md) | [模型失败检查](../.local/evidence/pet-model-errors/verification.txt)、[语音导入独立 PASS](../.local/evidence/voice-import-failure-order/independent-review.md)、[更新 helper 初轮冻结](../.local/evidence/update-copy/attempt1/manifest.json)。失败提示/安装门禁不构成真实媒体能力通过。更新 helper attempt1 定向通过后独立 FAIL：`/IS` 未覆盖相同大小/mtime、不同 ChangeTime 的 Modified 类，仍可留下旧正文；其后[attempt2 独立 PASS](../.local/evidence/update-copy/attempt2/independent-review.md)以真实helper验证正文/清单和14保护路径，修补已提交7fd0b1b；最终audit仍待清单收口。 |
 
-## 仍需完成的必要验证
+## 11月2日验证计划（已执行项与暂停项以上方当前结果为准）
 
 1. **部署已接受的媒体修补。** T4-H attempt2 覆盖原两个反例、普通文本/附件回归和同帧/无历史边界，独立限定通过；SDK patch 更新后的实际 Electron preload 12项通过。三文件原生补丁须整体应用，实际设备另验。
 2. **冻结并部署本次版本。** 主会话记录最终 commit、资产/依赖、实际启用设置与重启结果；最终 audit/regressions、相关插件和安装清单按该版本收口。现有最新整合前 [audit 日志](../.local/evidence/full-integration/final-audit-before-manifest.log) 是 **106/108**，两失败为更新 helper 与 manifest；定向修复通过不能改写该历史结果，也不能用早先 108/108 代替最终合并树结果。

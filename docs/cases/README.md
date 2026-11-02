@@ -6,6 +6,10 @@
 
 | 日期 | 案例 | 一句话 | 版本 |
 | --- | --- | --- | --- |
+| 2026-11-03 | [目的素材来源与时间](2026-11-03-purpose-source-metadata.md) | P1 attempt2功能独立通过，旧reader失效来源不复活；JS接线未做 | fork开发分支，未部署 |
+| 2026-11-03 | [完整融合实测与剩余项](2026-11-03-full-integration-live-results.md) | 9f实际QQ/Pet/工具与两小时观察、A01失败分母及purpose缺口 | 未完整验收 |
+| 2026-11-03 | [普通QQ活动](2026-11-03-companion-activity.md) | 取消闲置门槛；追加attempt4仍有桥接重启代次反例，未部署 | 待修复 |
+| 2026-11-03 | [语义冷启动与取消](2026-11-03-semantic-cold-qq.md) | attempt3仍有紧停和总时限反例，未部署 | 待修复 |
 | 2026-11-02 | [原生 QQ 消息链](2026-11-02-qq-sdk-message-chain.md) | 官方消息链转为受控消息段，保留原发送守卫 | fork开发分支 |
 | 2026-11-02 | [Cordis 服务身份](2026-11-02-fixed-model-cordis-identity.md) | 比较底层服务身份，代理调用与撤销仍有效 | fork开发分支 |
 | 2026-11-02 | [媒体宿主与桌宠播放](2026-11-02-local-media-host.md) | 原许可发送、持续播放代次与可见控制页 | fork开发分支 |

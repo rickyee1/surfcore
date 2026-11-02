@@ -3279,3 +3279,9 @@ ode scripts/setup-dsh.mjs desktop 恢复 bundle + 3 个 MCP 条目）。
 - **现象与根因**：B站部署前的审计偶发 107/108；目录复制后配置模板已可见，传输阶段却提前报告“完成”，凭据清洗尚未结束，轮询者因而提前退出。
 - **修法**：复制/解压后仅报告 99%“复制完成/解压完成”，整个安装的原有成功分支才报告 100%“完成”；清洗失败仍显示失败。
 - **验证**：可控复制 gate 和清洗拒绝夹具确定性复现并验证，没有靠反复重试读内容掩盖。定向、导入9项、默认值及完整审计 108/108 通过；见 [case 与回滚](cases/2026-11-02-voice-install-completion.md)。
+
+## 普通QQ活动不能依赖reserved2时间戳或记忆epoch（2026-11-03 T1 attempt4）
+
+独立验收补充：该attempt4 **FAIL、未部署且源码已隔离**。仅单调revision还不够：桥接重启可从0再次到1，宿主旧目的会误认成同一轮；需绑定桥接实例代次，并在同一最终发送守卫验证。用户追加的一次已耗尽，后续实现仍待次数授权。下面记录尝试方案和已覆盖的进程内行为，不能当成跨重启通过。
+
+普通chat不维护reserved2的lastIncomingAt；readiness因此把刚到来的真人消息误判成闲置约11小时。把时间戳放在await解析/入库后仍有竞态，auto_write=false、空正文或失败也不会提供epoch变化。可信入站必须在身份/白名单/去重后首await前同步记录account+owner与revision并撤旧主动候选；各主动阶段固定原revision，末次RPC后transport前再次同步核对revision、身份与foreground。只确认成功回执更新lastSent，unknown不得补发。用户取消了自主联系30min门槛，但没有取消quiet/focus/额度/90min冷却。原生adapter隔离证据与完整逻辑见 [case](cases/2026-11-03-companion-activity.md)。

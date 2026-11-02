@@ -1,6 +1,8 @@
 # A01 中文陪伴体验比较
 
-2026-11-02 冻结候选：`scripts/fixtures/a01-scenarios.json`，独立关键评审会话提供，主会话机械落盘。尚未运行，不能作为通过证据。
+2026-11-02 冻结候选：`scripts/fixtures/a01-scenarios.json`，独立关键评审会话提供，主会话机械落盘。以下标准未修改。
+
+2026-11-03 实际批次：原版59ec3066 / 融合版9f456d2，完整120次、115完成、5超时，双独立匿名评审已完成360项评分。原assess **FAIL**：融合版两项明确请求未交付；另40项同渠道模型参数一致性失败，不能宣称有效受控比较。原始15/30不劣仅为未筛选分母统计，不是通过结论。所有失败保留；详见[实测case](../cases/2026-11-03-full-integration-live-results.md)与 `.local/evidence/full-integration/a01-final-results.json`。
 
 原版固定 SurfCore `59ec3066f7d42a0452fae01f170c9a8484d5dbe5`（原融合方案第 2 节），不是融合版切到 legacy。融合版使用验收时冻结提交。qc=QQ chat 私聊、p=桌宠文本、rv=QQ reserved2 私聊、rg=QQ reserved2 群聊。群聊仅用隔离平台传输。
 

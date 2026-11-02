@@ -49,3 +49,9 @@ attempt2 新增及原链路合计 31 组检查通过；原审阅脚本的 18 组
 回滚先调用 stop，等待状态不再运行，再正常停用新 timer/route；如需撤回代码，恢复对应备份并重启宿主/桥接。保留加密记忆、配置、状态、ACL 和备份；不删除用户数据、不恢复宽 ACL。旧主动调度不会在 local 中自动恢复为宽松模式。
 
 发布交接：T1 新增公开读取器、自主协调器、模拟集成测试与本 case；窄改 index 注册、channel intent、LocalChannelBridge 发送、bridge 内部 seam 和 guarded 主动互斥、pet-purpose 互斥；attempt2 另局部扩展 facade.ingest 第四参 `derivedFrom:[{id,revision}]`。来源 ID、原子修订证明和 off 路径的只读检查接缝由 capability_service 工作者负责 Python，本单元没有编辑其文件；root 的管理页/备份改动不归本单元作者。不改版本、真实账号配置或共享文档，不提交或发布。最终 full diff、checks 和日志位于 `.local/evidence/t1-companion-*`，独立验收与真实部署由主会话接续。
+
+## 2026-11-03：普通 chat 活动与取消固定空闲等待
+
+用户明确追加 T1 attempt4（`user_authorized_extra=1`），原三次不清零。修补真实普通QQ入站在首个await前记录可信活动并撤旧候选、foreground和发送前原revision/身份守卫；自主协调器不再要求闲置30分钟，quiet/focus/额度/冷却保留。完整逻辑、原生22项隔离回归、归属、证据与发布交接见 [本次case](2026-11-03-companion-activity.md)。未部署/未真实外发，不代表原版多来源目的接线或完整融合验收完成。
+
+后续独立结果：attempt4 FAIL，桥接重启会复用活动revision，旧目的可能误通过。此修改已保存为完整补丁并从运行目录撤回，等待后续修补授权；当前运行版本仍有旧闲置门槛且自主关闭。用户选择的取消门槛是待完成行为，不能把上段尝试实现写成已生效。

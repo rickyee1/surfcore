@@ -1,5 +1,19 @@
 # 交接状态（HANDOFF）
 
+## 2026-11-03：实测收口与原 purpose 缺口（当前检查点）
+
+实际运行/远端已核对版本为 `9f456d24b3165773b805879a5d59912a1e6af1e2`；下节11月2日“待部署”为历史检查点。原生桌宠三文件补丁已应用，DSH ASAR未改。真实用户DPAPI/SQLCipher升级与记忆摘要保持、QQ/Pet跨端合成记忆召回（重建后3秒回复）、真实Writer消费、BGE CPU重建/查询、时间及合成文件经确认后桌宠送达、便签本机创建/读取、浏览器角色包下载及认证上传预览已有对应证据。角色包没有对用户库执行恢复；实际选择器仍缺浏览器扩展许可。详见[实测case](cases/2026-11-03-full-integration-live-results.md)。
+
+两小时观察已完成121样本，三个监听进程无重启。记忆/QQ可用121/121，DSH页面120/121（一次401），业务RPC unknown。前20分钟无输入且观测模型调用0；不宣称24小时稳定或后续未部署代码通过。A01完整120次与双独立盲评已结束：115完成、5超时，融合版两项漏答硬失败，另40项参数一致性阻塞；原assess FAIL。原始15/30不劣不能当受控比较结论。证据为 `.local/evidence/full-integration/a01-final-results.json` 与 `observer-two-hour-result.json`。
+
+semantic-host attempt3独立FAIL（紧停窗口仍提交新模型、ready8秒预算重置）；T1用户追加attempt4独立FAIL（桥接重启活动revision碰撞）。两项自动修补额度已耗尽，继续次数上限豁免问题待用户回答；不自动重试。P1元数据attempt2功能独立PASS（112相关行为检查、root audit108/108及regressions16通过），尚未接JS目的链路或部署；P1 attempt1失败及补充旧reader ABA红灯保留，不重置旧T1/semantic计数。
+
+P1独立报告 `.local/evidence/purpose-parity/p1-attempt2/independent-review.md`：已验证保存的实现补丁可准确重建采用模块；原生逐编辑调用事件/作者运行时归属不可读取，仍NOT_VERIFIED，不把角色名、自述或文件hash冒充宿主调用轨迹。主体实现来自原worker提交的完整补丁，主控只做集成、验证、状态文档和机械归档；后端provider/usage/费用未知。
+
+两项拒绝修改已隔离：`.local/backups/unaccepted-semantic3-t1extra4-20261103-0217` 保存10个跟踪文件的原字节/hash/combined.patch与2个新增测试；运行目录对应JS已逐字节恢复9f，未重启。P1 Python与新文档保留，后续修补须在隔离树恢复原补丁，不覆盖他人写集。
+
+用户确认取消30分钟闲置门槛，保留每日4次、90分钟冷却及23:30–08:30quiet。原版完整目的并非只由B站新视频触发；目前本地接线缺QQ/Pet经历、人格目标、待续与反馈，不能宣称完成。P1数据接缝之后还要补单协调器/单入口/单载体。主动联系仍关闭；夜间最多一条的临时测试许可未使用。用户明确暂停设备实测，media仍关闭；不要再次激活或索要设备测试。
+
 ## 2026-11-02：完整融合扩展进行中
 
 第二批 checkpoint：T2a、T1、T3 Broker/管理 UI、T2b Python 索引和 Writer 已独立通过。语义聊天/UI、T3固定聊天宿主与reserved2连续性在集中返修后独立通过：阻止旧RPC成功响应在紧停后发送，管理操作绑定用户审阅的角色/epoch，固定模型端点与实际SDK一致。语义浏览器合成 CPU 检索/纠正已通过。T4 Python 第3次实现独立通过并提交 `5030345`；有界设备打开、撤权与旧播放清理通过，媒体宿主第2次修补和精确SDK preload已独立通过；原许可最终发送与持续播放代次两项反例闭环。实际设备仍从未启用。T5第2次修补51项及独立评审通过。更新器Same/Modified漏拷第2次修补通过，已提交7fd0b1b。
