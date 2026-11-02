@@ -9,14 +9,13 @@
 //   使用者的体验是"我得读源码才知道要改哪" ✗ —— 这不是模板，是作者的自用件。
 //   现在：**填一个 `bili.config.json` 就完成自定义** ✓，其余全是中性默认值。
 //
-// 查找顺序：$SURFCORE_BILI_CONFIG → ~/.dsh/surfcore/bili.config.json → 内置默认值（中性）
+// 查找顺序：$SURFCORE_BILI_CONFIG → $DSH_HOME/surfcore/bili.config.json → 用户 ~/.dsh 兼容路径 → 内置默认值（中性）
 import fs from 'node:fs'
-import path from 'node:path'
+import { BILI_CONFIG } from './state-paths.mjs'
 import { DEFAULT_BILI_FISH_GUARD } from './fish-guard.mjs'
 import { DEFAULT_LIMITS } from './limits.mjs'
 
-const HOME = process.env.USERPROFILE || process.env.HOME || '.'
-export const configPath = process.env.SURFCORE_BILI_CONFIG || path.join(HOME, '.dsh', 'surfcore', 'bili.config.json')
+export const configPath = BILI_CONFIG
 
 /** 中性默认值：不含任何作者的个人信息，换个人也能跑。 */
 export const DEFAULTS = {
