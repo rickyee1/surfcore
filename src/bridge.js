@@ -17,7 +17,7 @@ import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
 import { fileURLToPath } from 'node:url';
-import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { SnowLumaWebSocketClient, MessageChain, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
@@ -16075,7 +16075,12 @@ async function main() {
       // Local mode uses the controlled HTTP seam so reconnect cannot delay an old send.
       if (localBackendGuarded()) {
         const message = args[0];
-        const segments = typeof message === 'string' ? [{ type: 'text', data: { text: message } }] : Array.isArray(message) ? message : message && typeof message === 'object' && typeof message.type === 'string' ? [message] : null;
+        // SDK text()/image() produce MessageChain, not a segment. Use only the
+        // official class/prototype; never invoke an arbitrary toSegments method.
+        const sdkChain = message && typeof message === 'object' && !Array.isArray(message) && typeof message.type !== 'string'
+          && message instanceof MessageChain && Object.getPrototypeOf(message) === MessageChain.prototype
+          && Array.isArray(Object.getOwnPropertyDescriptor(message, 'items')?.value);
+        const segments = typeof message === 'string' ? [{ type: 'text', data: { text: message } }] : Array.isArray(message) ? message : message && typeof message === 'object' && typeof message.type === 'string' ? [message] : sdkChain ? MessageChain.prototype.toSegments.call(message) : null;
         if (!segments) throw channelError('INVALID_REQUEST', '本地发送只接受明确的消息段。');
         return onebotSendSegments(kind, id, segments);
       }
