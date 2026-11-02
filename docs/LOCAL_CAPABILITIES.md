@@ -31,6 +31,14 @@ pwsh -NoProfile -File scripts/local-deployment.ps1 stop
 
 隔离 DSH 使用自己的模型配置。真实聊天前，在 DSH 的模型页面为 `deepseek-official` 配置 DeepSeek API Key 并保存，选择可用的默认模型。密钥仅填本机设置页。缺失或拒绝凭据时聊天返回 `MODEL_AUTH_REQUIRED`，其他模型调用故障返回 `MODEL_UNAVAILABLE`；本地记忆故障保持独立的错误提示。管理页健康检查通过只代表本地能力服务可用，不能证明模型或 QQ 已连通。
 
+### 已部署的 QQ 与桌宠
+
+本轮已在忽略提交的 `.local/apps/surfpet` 部署 surfpet v0.2.3，配套 Electron 45 已按官方 SHA 清单核验。DSH「设置 → SurfCore → 桌宠」可启动；桌宠右键菜单进入文本对话。真实 API/UI 的合成文本一问一答，以及正常重启后 userdata 设置摘要保留已验证。它们不代表语音已通过。
+
+SnowLuma v2.3.4 由用户按 EULA 5.4 手动部署并登录；由用户运行其官方 launcher，`snowluma.allowLaunch=false`。HTTP 与 WS 使用独立凭证，均只连接本机回环；实际凭据只在忽略提交的本机配置内。QQ 桥接已连接且 DSH/账号在线，主人首轮真实私聊及平台回复历史已确认；第二条出现约 356 秒延迟，定位为 reserved2 等待的旧代次与长回合占用。本轮已持久切换到受支持的 chat 模式，用户另发未重复答案的问题后，真实平台 4 秒内回复并正确召回先前合成测试口令，**主人普通私聊收发与记忆召回 PASS**。reserved2 的长回合问题仍未解决，当前未启用。
+
+准备阶段 QQ 平台开关和 `bridge.autoStart` 均关闭；当前运行阶段已开启 `platforms.start.qq`，既有配置模型将 `bridge.autoStart` 镜像为 true。B站、所有群聊、主动搭话、定时问候及自动历史补发保持关闭，仅允许 `<主人QQ>` 与 `<机器人QQ>` 的指定私聊。账号值不写入本说明。chat 模式每轮只输出最终文本，由桥接自动转发；无会话令牌时不调用二代发送/等待/收尾工具，有令牌仍保留 reserved2 工具契约。鉴权、白名单和代次检查不变，reserved2 连续私聊长回合问题仍未修复。运行与权限详情、证据位置见 [QQ/桌宠部署记录](cases/2026-11-02-qq-pet-deployment.md)。
+
 ## 使用与数据范围
 
 - 按角色保存后端：`legacy` 沿用原版，`shadow` 仅演练，`local` 使用新服务，`paused` 停用。正式本地写入后只允许暂停，不自动切回旧库。
@@ -48,7 +56,8 @@ pwsh -NoProfile -File scripts/local-deployment.ps1 stop
 | --- | --- |
 | 独立管理页 / DSH 设置 | 共用管理处理器和加密服务，提供测试迁移及用户主权操作 |
 | 桌宠聊天适配 | 按范围取记忆，模型返回和队列输出前复核代次，停用旧卡片旁路 |
-| QQ chat / reserved / reserved2 | 可信消息绑定、新会话上下文、实际发送校验；保留显式发送和等待 |
+| QQ chat | 可信消息绑定、新会话上下文、代次复核后自动转发最终文本；当前仅主人私聊，真实收发及 4 秒记忆召回通过 |
+| QQ reserved / reserved2 | 保留显式发送和等待；reserved2 连续私聊的长回合/旧代次等待问题尚未修复 |
 | QQ closed-agent / 未纳管动作 | local 模式下拒绝，避免完整本机工具绕过治理；M3 另行接入 |
 | B站 | 公共记忆投影；自主调度因 CLI 发送未绑定生成代次而暂停，返回 `BILI_GENERATION_UNVERIFIED` |
 | 语音输入、屏幕、备份恢复、完整发布 | M3–M5 后续工作 |
@@ -65,5 +74,9 @@ npm --prefix plugins/surfcore test
 ```
 
 上游审计需要先从示例创建 `config.json`；Windows 生成文件的换行差异可用 `node scripts/build-agent-preset-patches.mjs` 重建。测试只使用临时/隔离数据，不发送真实平台消息。实测见 [实施记录](cases/2026-11-02-local-capabilities.md)。
+
+chat 提示分流后的最终全仓库 `test:audit` 为 108/108 脚本通过，日志在 `.local/evidence/qq-pet-final-audit.log`。后续 chat 提示分流的渠道集成 18 项、bridge audit 16 项和 regressions 16 项通过。本机部署的真实验证分层记录：DSH 模型及记忆纠错/删除、桌宠 API/UI 文本与重启持久化已通过；QQ 当前 chat 模式在 DSH 同步及 5 秒轮询后保持，真实主人私聊收发与 4 秒记忆召回通过；证据为 `.local/evidence/qq-chat-mode-sync.json` 和 `qq-chat-live-retest.json`。reserved2 曾发生约 356 秒延迟，当前未启用且仍未解决。语音、同模型 30 场景和 M3–M5 未完成。QQ/桌宠截图或在线状态不能代替相应收发行为证据。
+
+新增 fork 已收紧目录和凭据 ACL，保留 Chromium 在 surfpet userdata 的 Shared Dictionary、Network、Cache 三棵原有运行时树所需能力 ACE；关键 25 项及整树最终独立复验通过。回滚用正常设置/API 停桥接与桌宠，保留 `.local/backups/` 及数据库，不自动恢复 Everyone/Users 宽权限。
 
 未开启时可继续 legacy。正式写入后先暂停、导出核对，再明确修复或回迁，不能直接覆盖旧快照。保留 `.local/` 数据库和 `key.dpapi`，不要提交到 Git，也不要复制原路遥密钥。新库加密不代表原 DSH 日志、平台消息或导出的明文 JSON 同样加密。

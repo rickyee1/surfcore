@@ -36,6 +36,9 @@ try {
     assert.equal(adapter.events.get(event.key).length, 1);
     const prompt = await adapter.prepare(event.key, 's1', 'token1');
     assert.match(prompt, /我喜欢紫色/);
+    assert.match(prompt, /agentToken=token1/);
+    assert.match(prompt, /可自然分条发送并等待新消息/);
+    assert.match(prompt, /发送后用 qq_set_wake_config 或 qq_mark_read 收尾/);
     assert.doesNotMatch(prompt, /legacy-secret/);
   });
   await check('actual private send validates original generation', async () => {
@@ -152,6 +155,10 @@ try {
     await h.localChannels.incoming(event.key, { ...event.event, message_id: 10 }, '本轮有效问候');
     await h.deliverPrompt(event.key, 'legacy-secret 从旧完整归档来的内容');
     assert.match(h.calls.prompts[0].content[0].text, /本轮有效问候/);
+    assert.match(h.calls.prompts[0].content[0].text, /直接输出本轮最终回复，由桥接自动转发/);
+    assert.match(h.calls.prompts[0].content[0].text, /不要调用 QQ 发送工具/);
+    assert.match(h.calls.prompts[0].content[0].text, /不要调用 qq_wait_for_messages、qq_set_wake_config 或 qq_mark_read/);
+    assert.doesNotMatch(h.calls.prompts[0].content[0].text, /agentToken=/);
     assert.doesNotMatch(h.calls.prompts[0].content[0].text, /legacy-secret/);
     const old = h.state.sessions[event.key];
     await h.localChannels.incoming(event.key, { ...event.event, message_id: 11 }, '第二轮问候');

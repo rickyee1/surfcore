@@ -5,6 +5,7 @@
 // 换 QQ 账号登录后，任何把 token 写死在 config.json 里的工具都会 401 ——
 // 这正是"换个账号登录，发语音工具就不行了"的原因。
 import fs from 'node:fs';
+import vm from 'node:vm';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +116,38 @@ console.log('## 独立工具确实用它（源码级）');
   const bridge = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
   ok(/healTokenIfStale/.test(bridge), 'bridge 有 token 自愈');
   ok(/persistToken/.test(bridge), 'bridge 会把有效 token 写回 config.json');
+}
+
+console.log('## 凭证日志不包含值或前缀');
+{
+  const bridge = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
+  const markers = ['控制台未配置 consoleToken', 'SnowLuma WS 连接已更新', 'SnowLuma HTTP 凭证已更新'];
+  const captures = [];
+  const context = {
+    configuredToken: '', consoleToken: '9c31e7-fixture-console-value',
+    wsChanged: true, wsToken: '48b6d2-fixture-ws-value',
+    httpToken: '0d9a73-fixture-http-new-value',
+    cfg: { snowluma: { accessToken: '73ce19-fixture-http-old-value' } },
+    r: { source: 'fixture-onebot-account' }, wsUrl: 'ws://127.0.0.1:3001',
+    log: message => captures.push(message),
+  };
+  for (const marker of markers) {
+    const line = bridge.split(/\r?\n/).find(line => line.includes(marker) && line.includes('log('));
+    ok(Boolean(line), `${marker} 日志仍存在`);
+    if (line) vm.runInNewContext(line.trim(), context);
+  }
+  const output = captures.join('\n');
+  const credentials = [context.consoleToken, context.wsToken, context.httpToken, context.cfg.snowluma.accessToken];
+  ok(credentials.every(value => !output.includes(value) && !output.includes(value.slice(0, 4)) && !output.includes(value.slice(0, 6))), '真实日志表达式不输出任何假凭据值或前缀');
+  ok(captures.length === 3 && captures.every(line => line.includes('已配置')), '日志保留凭证配置状态');
+  ok(captures.slice(1).every(line => line.includes('fixture-onebot-account')), 'SnowLuma 日志保留非秘密来源标识');
+  context.wsToken = ''; context.httpToken = '';
+  captures.length = 0;
+  for (const marker of markers.slice(1)) {
+    const line = bridge.split(/\r?\n/).find(line => line.includes(marker) && line.includes('log('));
+    if (line) vm.runInNewContext(line.trim(), context);
+  }
+  ok(captures.length === 2 && captures.every(line => line.includes('未配置')), '无凭据时仅输出未配置状态');
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

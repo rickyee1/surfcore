@@ -87,7 +87,10 @@ export class LocalChannelBridge {
     for (const [id, old] of this.tokens) if (old.key === key) this.tokens.delete(id);
     this.sessions.set(sessionId, record); if (token) this.tokens.set(token, record);
     this.events.delete(key);
-    return `${persona}\n【本轮受众】${channel.kind}:${channel.peer}\n【有效记忆】\n${ctx.text || ''}\n【当前入站消息】\n${events.map(e => e.text).join('\n')}\n只回复当前受众。需要发送时使用该会话工具，agentToken=${token || ''}；可自然分条发送并等待新消息。发送后用 qq_set_wake_config 或 qq_mark_read 收尾。不得读取旧记忆卡、完整归档、跨平台同步或其他会话。`;
+    const delivery = token
+      ? `需要发送时使用该会话工具，agentToken=${token}；可自然分条发送并等待新消息。发送后用 qq_set_wake_config 或 qq_mark_read 收尾。`
+      : '请直接输出本轮最终回复，由桥接自动转发到当前受众。不要调用 QQ 发送工具，也不要调用 qq_wait_for_messages、qq_set_wake_config 或 qq_mark_read；无需等待或安排后续回合。';
+    return `${persona}\n【本轮受众】${channel.kind}:${channel.peer}\n【有效记忆】\n${ctx.text || ''}\n【当前入站消息】\n${events.map(e => e.text).join('\n')}\n只回复当前受众。${delivery}不得读取旧记忆卡、完整归档、跨平台同步或其他会话。`;
   }
   enterSession(id) { this.origin.enterWith(this.sessions.get(id) || null); }
   enterToken(token) { this.origin.enterWith(this.tokens.get(token) || null); }
