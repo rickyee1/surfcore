@@ -17,7 +17,7 @@ echo provider text, file bodies or credentials.
 | `tool.execute` | `{execution_id}` | Original role/principal/channel; revalidates current epoch/policy/descriptor/target/grant |
 | `tool.cancel` | `{execution_id}` | Own subject or management; late callbacks cannot change its terminal state |
 | `tool.status` | `{execution_id}` | Own subject or management; never launches/replays |
-| `tool.history` | `{limit?:1..100}` | Own subject or management; bounded newest-first history |
+| `tool.history` | `{limit?:1..100,idempotency_key?:string}` | Bounded newest-first history; exact-key mode always current role+resolved subject, metadata only |
 | `tool.result.read` | `{result_id}` | Management only; current successful result, `{body,local_only:true,result_revision:1}` |
 | `tool.roots.list` | `{}` | Management: roots including path/label/active |
 | `tool.roots.register` | `{path,label}` | Management: absolute ordinary Windows directory; returns opaque root_id |
@@ -53,6 +53,22 @@ No arbitrary adapters/tools/network/CLI registration API exists.
 Same role+resolved subject+tool+idempotency key with different action/arguments or
 descriptor hash fails `IDEMPOTENCY_CONFLICT`. Repeating execute returns the stored
 metadata and never launches twice. Confirm cannot supply replacement arguments.
+
+T3-H compatibility seam: `tool.propose` additionally returns `duplicate:false` for
+a newly persisted execution, or `duplicate:true` for the same existing request.
+This survives service restart/rebinding of the same subject and auto_write=false.
+Host must not treat a duplicated terminal execution as a fresh model/send turn.
+Subject isolation, parameter checks and execute idempotency remain unchanged; no
+extra result body or database retrieval is introduced by this flag.
+
+Before the proposal model, host can call `tool.history {idempotency_key,limit:1}`.
+The optional key is an exact bounded nonempty string (<=200), never LIKE/global
+search. This mode always filters SQL by current character AND resolved subject,
+including management. It returns no arguments/result body and does not read time
+result bodies; another subject/role or wrong key returns an empty list. Same-subject
+rebinding/restart retains visibility of metadata, even with auto_write=false. Host
+quietly ends the replay before any model/send; the propose duplicate flag still
+guards concurrent prechecks. Omitting the filter preserves existing history behavior.
 
 For external adapters, execute first commits `running` plus grant consumption;
 only its post-commit callback starts one of two bounded daemon workers. Workers

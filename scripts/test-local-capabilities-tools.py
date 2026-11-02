@@ -168,7 +168,10 @@ class Tools(unittest.TestCase):
 
     def test_idempotency_and_unknown_schema(self):
         first=self.tool('notes.create',dict(title='t',text='synthetic'),key='same')
-        self.assertEqual(self.tool('notes.create',dict(title='t',text='synthetic'),key='same')['execution_id'],first['execution_id'])
+        self.assertFalse(first['duplicate'])
+        duplicate=self.tool('notes.create',dict(title='t',text='synthetic'),key='same')
+        self.assertTrue(duplicate['duplicate'])
+        self.assertEqual(duplicate['execution_id'],first['execution_id'])
         self.bad(self.call('tool.propose',dict(tool_id='notes.create',action='create',arguments=dict(title='t',text='changed'),idempotency_key='same'),self.pet),'IDEMPOTENCY_CONFLICT')
         for tool,action,args in [('shell','run',{}),('time.now','read',dict(command='anything')),('notes.create','create',dict(title='t',text='x',path='C:\\x'))]:
             self.bad(self.call('tool.propose',dict(tool_id=tool,action=action,arguments=args,idempotency_key='bad'),self.pet),'TOOL_NOT_ALLOWED' if tool=='shell' else 'INVALID_REQUEST')
@@ -177,6 +180,57 @@ class Tools(unittest.TestCase):
         two=self.good(self.call('tool.execute',dict(execution_id=first['execution_id']),self.pet))
         self.assertEqual(one,two)
         self.assertEqual(self.service.db.execute('SELECT count(*) FROM tool_notes').fetchone()[0],1)
+
+    def test_proposal_duplicate_survives_restart_rebinding_and_auto_write_off(self):
+        first=self.tool('time.now',key='trusted-event-stable-hash')
+        self.assertFalse(first['duplicate'])
+        self.good(self.call('tool.execute',dict(execution_id=first['execution_id']),self.pet))
+        self.good(self.call('memory.settings',dict(auto_write=False),self.owner))
+        rebound=self.bind('pet:local',owner=True)
+        history=self.good(self.call('tool.history',dict(idempotency_key='trusted-event-stable-hash',limit=1),rebound))
+        self.assertEqual([row['execution_id'] for row in history['executions']],[first['execution_id']])
+        self.service.close()
+        self.service=fixtures.CapabilityService(self.directory,clock=lambda:self.now)
+        self.activate('a');self.owner=self.bind('owner:local',owner=True,management=True);self.pet=self.bind('pet:local',owner=True)
+        repeated=self.tool('time.now',key='trusted-event-stable-hash')
+        self.assertTrue(repeated['duplicate'])
+        self.assertEqual(repeated['execution_id'],first['execution_id'])
+        self.assertEqual(repeated['state'],'succeeded')
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM tool_executions').fetchone()[0],1)
+        self.assertFalse(self.good(self.call('memory.settings',{},self.owner))['auto_write'])
+        history=self.good(self.call('tool.history',dict(idempotency_key='trusted-event-stable-hash',limit=1),self.pet))
+        self.assertEqual([row['execution_id'] for row in history['executions']],[first['execution_id']])
+
+    def test_history_exact_key_is_subject_scoped_and_never_reads_body(self):
+        request=self.tool('notes.create',dict(title='fixture',text='synthetic HISTORY-PRIVATE'),key='exact-history-key')
+        self.confirm(request)
+        self.good(self.call('tool.execute',dict(execution_id=request['execution_id']),self.pet))
+        time_request=self.tool('time.now',key='exact-history-time')
+        self.good(self.call('tool.execute',dict(execution_id=time_request['execution_id']),self.pet))
+        for binding in (self.bob,self.owner):
+            self.assertEqual(self.good(self.call('tool.history',dict(idempotency_key='exact-history-key',limit=1),binding))['executions'],[])
+        own=self.good(self.call('tool.history',dict(idempotency_key='exact-history-key',limit=1),self.pet))
+        self.assertEqual([row['execution_id'] for row in own['executions']],[request['execution_id']])
+        self.assertNotIn('HISTORY-PRIVATE',json.dumps(own))
+        self.assertNotIn('arguments',own['executions'][0])
+        self.assertEqual(self.good(self.call('tool.history',dict(idempotency_key='exact-history-%',limit=1),self.pet))['executions'],[])
+        for invalid in ('',123,'x'*201):
+            self.bad(self.call('tool.history',dict(idempotency_key=invalid,limit=1),self.pet),'INVALID_REQUEST')
+        statements=[]
+        self.service.db.set_trace_callback(statements.append)
+        try:
+            filtered=self.good(self.call('tool.history',dict(idempotency_key='exact-history-time',limit=1),self.pet))
+        finally:
+            self.service.db.set_trace_callback(None)
+        self.assertNotIn('result',filtered['executions'][0])
+        self.assertFalse(any('SELECT body FROM tool_results' in sql for sql in statements))
+        self.assertFalse(any('SELECT * FROM tool_executions' in sql for sql in statements))
+        admin=self.tool('notes.create',dict(title='fixture',text='synthetic ADMIN-HISTORY-PRIVATE'),key='exact-history-key',binding=self.owner)
+        filtered_admin=self.good(self.call('tool.history',dict(idempotency_key='exact-history-key',limit=1),self.owner))
+        self.assertEqual([row['execution_id'] for row in filtered_admin['executions']],[admin['execution_id']])
+        self.assertNotIn('ADMIN-HISTORY-PRIVATE',json.dumps(filtered_admin))
+        self.activate('b');owner_b=self.bind('owner:local',owner=True,management=True,character='b')
+        self.assertEqual(self.good(self.call('tool.history',dict(idempotency_key='exact-history-key',limit=1),owner_b,character='b'))['executions'],[])
 
     def test_confirm_digest_revision_and_expiry(self):
         request=self.tool('notes.list')

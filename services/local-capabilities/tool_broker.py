@@ -93,7 +93,7 @@ class ToolBroker:
             fail('PERMISSION_DENIED', '执行记录不可访问。')
         return row
 
-    def summary(self, row, session):
+    def summary(self, row, session, include_result=True):
         item = dict(execution_id=row['id'], revision=row['revision'], state=row['state'], tool_id=row['tool'],
                     character_id=row['character'], character_epoch=row['epoch'], policy_generation=row['policy_generation'],
                     tool_version=self.descriptors[row['tool']]['version'] if row['tool'] in self.descriptors and self.descriptors[row['tool']]['descriptor_hash']==row['descriptor'] else None,
@@ -105,7 +105,7 @@ class ToolBroker:
             item.update(error='本机工具未完成。', hint='核验当前目标和权限；unknown 状态请先人工核验，不重放旧执行。')
         if session['management']:
             item.update(arguments=json_load(row['arguments']), subject=json_load(row['subject']))
-        if row['result_id'] and row['tool'] == 'time.now':
+        if include_result and row['result_id'] and row['tool'] == 'time.now':
             result = self.db.execute('SELECT body FROM tool_results WHERE id=?', (row['result_id'],)).fetchone()
             if result and self.fresh_result(row):
                 item['result'] = json_load(result[0])
@@ -174,10 +174,18 @@ class ToolBroker:
         if op == 'tool.propose':
             return self.propose(session, params)
         if op == 'tool.history':
-            fields(params, (), ('limit',))
+            fields(params, (), ('limit','idempotency_key'))
             limit = params.get('limit', 50)
             if type(limit) is not int or not 1 <= limit <= 100:
                 fail('INVALID_REQUEST', '记录数量必须在 1 到 100 之间。')
+            if 'idempotency_key' in params:
+                key = bounded(params['idempotency_key'])
+                # Host pre-model replay check. Management cannot widen this subject,
+                # and even public time bodies must not be read through the metadata seam.
+                rows = self.db.execute('SELECT id,character,epoch,tool,action,arguments_hash,descriptor,target,confirmation_digest,policy_generation,state,revision,result_id,error_code FROM tool_executions WHERE character=? AND subject=? AND idem=? ORDER BY created DESC,rowid DESC LIMIT ?',
+                                       (session['character'],self.subject(session),key,limit)).fetchall()
+                view = dict(session,management=False)
+                return dict(executions=[self.summary(row,view,include_result=False) for row in rows],local_only=True)
             rows = self.db.execute('SELECT * FROM tool_executions WHERE character=?' + ('' if session['management'] else ' AND subject=?') + ' ORDER BY created DESC,rowid DESC LIMIT ?',
                                    (session['character'], limit) if session['management'] else (session['character'], self.subject(session), limit)).fetchall()
             return dict(executions=[self.summary(row, session) for row in rows], local_only=True)
@@ -208,7 +216,7 @@ class ToolBroker:
         if old:
             if old['request_hash'] != request_hash:
                 fail('IDEMPOTENCY_CONFLICT', '同一幂等键对应了不同参数或工具版本。', '保留旧执行记录；不同请求必须使用新幂等键。')
-            return self.summary(old, session)
+            return dict(self.summary(old, session), duplicate=True)
         target = self.target(session, tool_id, args)
         identifier, arguments_hash = uuid.uuid4().hex, hashed(args)
         generation = self.policy()['generation']
@@ -221,7 +229,7 @@ class ToolBroker:
         row = self.execution(session, identifier)
         if tool_id == 'time.now' or self.find_grant(row):
             self.db.execute("UPDATE tool_executions SET state='authorized' WHERE id=?", (identifier,))
-        return self.summary(self.execution(session, identifier), session)
+        return dict(self.summary(self.execution(session, identifier), session), duplicate=False)
 
     def confirm(self, session, row, params):
         self.service.management(session)
