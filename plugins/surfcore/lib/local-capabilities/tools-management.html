@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SurfCore · 本机工具与权限</title>
+<style>
+body{font:16px system-ui;background:#101923;color:#e5edf6;max-width:1100px;margin:40px auto;padding:0 24px}button,input,select{font:inherit;padding:10px;border:1px solid #52657a;border-radius:6px;background:#1c2b3b;color:inherit;margin:5px;max-width:100%;box-sizing:border-box}button{cursor:pointer;background:#285b75}button:disabled{opacity:.55;cursor:default}section{border:1px solid #354858;border-radius:12px;padding:20px;margin:20px 0}p{line-height:1.7}#error{background:#602b35;padding:14px;white-space:pre-wrap;position:sticky;top:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}.row{border-top:1px solid #354858;padding:12px 0}label{display:block;margin:10px 0}input[type=text]{min-width:260px}a{color:#99d3ee}h2{font-size:1.3rem}
+</style>
+<h1>本机工具与权限</h1>
+<nav><a href="__API_BASE__">本地记忆管理</a></nav>
+<main id="tools-root"></main>
+<script type="module">
+__TOOLS_CLIENT__
+mountToolsManagement({document,root:document.getElementById('tools-root'),base:'__API_BASE__',token:'__SESSION_TOKEN__'});
+</script>
+</html>
