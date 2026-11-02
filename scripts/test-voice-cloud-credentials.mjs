@@ -152,8 +152,37 @@ try {
   };
 
   const packDir = path.join(base, 'packs', 'voice-cloud-fixture');
-  const started = await vp.install('voice-cloud-fixture');
-  ok(started?.ok === true, 'install() 已启动');
+  // Hold a synthetic config copy after it becomes visible, before cleaning can run.
+  // This deterministically exposes a transfer stage incorrectly reported as terminal.
+  async function withPausedConfigCopy(dir, inspect) {
+    const original = fsp.copyFile;
+    let release;
+    let copied;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const visible = new Promise((resolve) => { copied = resolve; });
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('等待合成配置复制超时')), 5000);
+    });
+    fsp.copyFile = async (source, destination, ...options) => {
+      const result = await original(source, destination, ...options);
+      if (path.resolve(destination) === path.join(dir, 'config.toml')) {
+        copied();
+        await gate;
+      }
+      return result;
+    };
+    try { await inspect(() => Promise.race([visible, timeout])); }
+    finally { clearTimeout(timer); release(); fsp.copyFile = original; }
+  }
+  await withPausedConfigCopy(packDir, async (copied) => {
+    const started = await vp.install('voice-cloud-fixture');
+    ok(started?.ok === true, 'install() 已启动');
+    await copied();
+    const pending = (await vp.list()).packs.find((p) => p.id === 'voice-cloud-fixture');
+    ok(Boolean(pending?.install) && pending.install.phase !== '完成' && pending.install.phase !== '失败',
+      '配置已复制但尚未清洗时，安装保持非终态');
+  });
   const first = await wait('voice-cloud-fixture');
   ok(first.ok === true, `安装完成${first.ok ? '' : '：' + first.failed}`);
   {
@@ -161,6 +190,32 @@ try {
     ok(!text.includes('0f74ZU') && !text.includes('3773727341'), '装完的 config.toml 里没有任何预置凭据');
     ok(text.includes('cloud_resource = "seed-icl-2.0"'), 'cloud_resource 没被清掉');
   }
+
+  // Inject a write failure only for another disposable fixture's cleaning step.
+  const failureId = 'voice-cloud-clean-failure-fixture';
+  const failureDir = path.join(base, 'packs', failureId);
+  cfg.voicePacks.manifests.push({ ...cfg.voicePacks.manifests[0], id: failureId, port: 39877 });
+  const originalWrite = fsp.writeFile;
+  let cleaningRefused = false;
+  fsp.writeFile = async (file, ...options) => {
+    if (path.resolve(file) === path.join(failureDir, 'config.toml')) {
+      cleaningRefused = true;
+      throw Object.assign(new Error('合成夹具：配置清洗写入被拒绝'), { code: 'EACCES' });
+    }
+    return originalWrite(file, ...options);
+  };
+  try {
+    await withPausedConfigCopy(failureDir, async (copied) => {
+      await vp.install(failureId);
+      await copied();
+      const pending = (await vp.list()).packs.find((p) => p.id === failureId);
+      ok(Boolean(pending?.install) && pending.install.phase !== '完成', '清洗失败前的传输阶段不能冒充安装完成');
+    });
+    const failed = await wait(failureId);
+    const state = (await vp.list()).packs.find((p) => p.id === failureId);
+    ok(cleaningRefused && Boolean(failed.failed) && !failed.ok && state?.install?.phase === '失败' && !state.installedAt,
+      '清洗写入失败进入失败终态，不登记安装成功');
+  } finally { fsp.writeFile = originalWrite; }
 
   console.log('## 4. 云端包：没配置时 list()/start() 都要指路');
   const base2 = path.join(base, 'cloud-state');

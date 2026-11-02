@@ -261,7 +261,7 @@ async function fetchToLocal(cfg, id, src, destDir, onProgress = () => {}) {
   if (st.isDirectory()) {
     onProgress(10, '复制中');
     await fsp.cp(src, destDir, { recursive: true, force: true });
-    onProgress(100, '完成');
+    onProgress(99, '复制完成');
     return;
   }
   onProgress(10, '解压中');
@@ -271,7 +271,7 @@ async function fetchToLocal(cfg, id, src, destDir, onProgress = () => {}) {
     p.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`解压失败（exit ${code}）`))));
     p.on('error', reject);
   });
-  onProgress(100, '完成');
+  onProgress(99, '解压完成');
 }
 
 // ── 云端凭据边界（2026-10-29）──────────────────────────────────────────────
