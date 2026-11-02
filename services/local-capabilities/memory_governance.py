@@ -86,6 +86,9 @@ class MemoryGovernance:
 
     def pending(self, session, params):
         limit = integer(params.get('limit', 20), 1, 100)
+        auto_write = bool(self.db.execute('SELECT auto_write FROM characters WHERE id=?', (session['character'],)).fetchone()[0])
+        if not auto_write:
+            return dict(episodes=[], auto_write=False, memory_epoch=self.service.epoch(session['character']), index='deterministic_keywords_v1')
         permitted = {row['id']: row for row in self.service.visible_rows(dict(session, management=False))}
         result = []
         for row in permitted.values():
@@ -100,7 +103,7 @@ class MemoryGovernance:
                 result.append(record)
             if len(result) == limit:
                 break
-        return dict(episodes=result, memory_epoch=self.service.epoch(session['character']), index='deterministic_keywords_v1')
+        return dict(episodes=result, auto_write=True, memory_epoch=self.service.epoch(session['character']), index='deterministic_keywords_v1')
 
     def dispatch(self, operation, session, params):
         if operation == 'memory.episodes.pending':
@@ -141,8 +144,8 @@ class MemoryGovernance:
             self.check_epoch(character, params.get('expected_memory_epoch'))
             sources = self.visible_sources(session, params.get('source_ids'), params.get('source_revisions'))
             items = params.get('proposals')
-            if not isinstance(items, list) or not 1 <= len(items) <= 6:
-                raise ServiceError('INVALID_REQUEST', '一个来源批次只允许 1–6 条提案。')
+            if not isinstance(items, list) or not 0 <= len(items) <= 6:
+                raise ServiceError('INVALID_REQUEST', '一个来源批次只允许 0–6 条提案。')
             for item in items:
                 if not isinstance(item, dict) or item.get('operation') not in ('add', 'supersede', 'invalidate') or item.get('kind') not in KINDS:
                     raise ServiceError('INVALID_REQUEST', '提案操作或认知类型无效。')

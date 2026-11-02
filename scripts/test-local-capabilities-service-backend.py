@@ -521,5 +521,36 @@ class Backend(unittest.TestCase):
                     self.assertNotEqual(saved['id'],private['id'])
 
 
+    def test_t2b_empty_proposals_consume_source_once_with_all_proofs(self):
+        source=self.good(self.ingest(self.pet,'empty-writer-source','Synthetic episode with no durable assertion'))
+        payload=dict(proposal_id='empty-writer-batch',source_ids=[source['id']],source_revisions={source['id']:1},expected_memory_epoch=self.epoch(),proposals=[])
+        self.bad(self.call('memory.proposals.submit',dict(payload,source_revisions={}),self.pet),'INVALID_REQUEST')
+        self.bad(self.call('memory.proposals.submit',dict(payload,source_revisions={source['id']:2}),self.pet),'VERSION_CONFLICT')
+        self.good(self.call('memory.proposals.submit',payload,self.pet))
+        result=self.good(self.commit('empty-writer-batch'))
+        self.assertEqual(result['ids'],[])
+        self.assertEqual(self.good(self.call('memory.episodes.pending',{},self.pet))['episodes'],[])
+        self.assertEqual(self.good(self.commit('empty-writer-batch'))['ids'],[])
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM episode_consumption WHERE episode=?',(source['id'],)).fetchone()[0],1)
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM memories').fetchone()[0],1)
+        self.bad(self.call('memory.proposals.submit',dict(payload,proposal_id='empty-writer-other'),self.pet),'SOURCE_CONSUMED')
+
+    def test_t2b_auto_write_off_pending_is_empty_and_read_only(self):
+        source=self.good(self.ingest(self.pet,'writer-disabled-source','Synthetic source'))
+        self.good(self.ingest(self.bob,'other-subject-writer','Other private source'))
+        pending=self.good(self.call('memory.episodes.pending',{},self.pet))
+        self.assertTrue(pending['auto_write'])
+        self.assertEqual([row['id'] for row in pending['episodes']],[source['id']])
+        self.good(self.call('memory.settings',dict(auto_write=False),self.owner))
+        changes=self.service.db.total_changes
+        pending=self.good(self.call('memory.episodes.pending',{},self.pet))
+        self.assertFalse(pending['auto_write'])
+        self.assertEqual(pending['episodes'],[])
+        self.assertEqual(self.service.db.total_changes,changes)
+        payload=dict(proposal_id='disabled-empty',source_ids=[source['id']],source_revisions={source['id']:1},expected_memory_epoch=self.epoch(),proposals=[])
+        self.bad(self.call('memory.proposals.submit',payload,self.pet),'AUTO_WRITE_DISABLED')
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM episode_consumption').fetchone()[0],0)
+
+
 if __name__=='__main__':
     unittest.main(verbosity=2)

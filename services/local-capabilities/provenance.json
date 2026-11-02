@@ -59,5 +59,37 @@
       "Additive active source ID and optional source revision proofs for T1 channel ingestion"
     ],
     "narrow_seam": "Attempt3: before AUTO_WRITE_DISABLED run non-writing role-wide tombstone/input/source checks; exact stored sources must be active and recursively visible. Same-role foreign/quarantine event existence denies transient fallback without body/id lookup; other-role events do not affect it. Enabled per-scope persistence unchanged."
+  },
+  "t3": {
+    "task": "/root/capability_service T3 attempt1",
+    "baseline": "0904c404b17f002171e1e51ce156365ef02f8639",
+    "adaptation": "Conceptual adaptation of fixed tool metadata, exact confirmation fingerprints, scoped grants, execution state transitions, cancellation and durable unknown/no-replay. Purpose-built SQLCipher broker, Windows handle pinning and management-only exact-result delivery; no source modules imported or runtime-linked.",
+    "source_files": [
+      {
+        "path": "session/execution_broker.py",
+        "sha256": "ee511fd3b33fac81449958d74974a1e96d708ca74f1f81225d894366f4394b63"
+      },
+      {
+        "path": "session/permissions.py",
+        "sha256": "efdd977a90092e9f8eecc3bd1910459a73d8419fb71348069b44d20535305251"
+      },
+      {
+        "path": "session/execution_journal.py",
+        "sha256": "1260216ca74f3d143111b63efffbcee94826916f98fbe8a6d57d487ac59993cf"
+      },
+      {
+        "path": "session/tool_contracts.py",
+        "sha256": "7eb563fddbcc66ba121e20389f8000b0bbd29f3ff24a011df1f68ed3330d5e0b"
+      },
+      {
+        "path": "session/builtin_tools.py",
+        "sha256": "289a4b2e7eed3603be412106926ce9dc8c7f54bff24d14c2db59eaa7c86ec408"
+      }
+    ],
+    "dependencies": "No new package; Python stdlib ctypes/threading/queue/subprocess and existing sqlcipher3==0.6.2.",
+    "limits": "No arbitrary code/shell/network tools; no real user DB, Explorer, lockscreen, device or external-message test. Host/UI integration and live acceptance remain separate. Tool tables not included in memory backup allowlist.",
+    "t2b_compatibility_seam": "Root-authorized: zero-proposal batches still consume validated source revisions atomically/idempotently; pending returns auto_write and empty episodes when disabled, without writes.",
+    "repair_attempt": 2,
+    "repair": "Independent poll COMMIT failure counterexamples: stage in-memory lock publication and completion ACK/job removal until durable COMMIT; synchronous sticky persistence_fault and worker cancellation even if ROLLBACK fails; recovered storage first persists closed/new generation/unknown and invalidates exports. Same-process reset cannot clear fault; restart cannot revive old binding/results. No protocol parameter changes or additional dependencies."
   }
 }

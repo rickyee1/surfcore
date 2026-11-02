@@ -1,6 +1,6 @@
 """Local authority: trusted stdio bindings, audience-first retrieval and durable budgets.
 
-Adapted domain concepts from Luyao; see provenance.json. No LLM, network or timers.
+Adapted domain concepts from Luyao; see provenance.json. No LLM or network calls.
 """
 import hashlib
 import json
@@ -54,6 +54,8 @@ class CapabilityService:
             self.governance = MemoryGovernance(self)
             from backup import BackupManager
             self.backups = BackupManager(self)
+            from tool_broker import ToolBroker
+            self.tools = ToolBroker(self)
             # A manually restored older main file must still obey the independent ledger.
             self.db.execute('BEGIN IMMEDIATE')
             victims = self.db.execute('SELECT DISTINCT f.character,f.memory FROM fingerprints f JOIN sovereignty.tombstones t ON t.character=f.character AND t.kind=f.kind AND t.digest=f.digest JOIN memories m ON m.id=f.memory WHERE m.status!=?', ('deleted',)).fetchall()
@@ -70,12 +72,21 @@ class CapabilityService:
             raise ServiceError('SERVICE_UNAVAILABLE','记忆治理初始化失败。','保留数据和删除记录，检查版本与磁盘状态后重试。') from None
 
     def close(self):
-        self.store.close()
+        try:
+            if self.store.conn is not None and hasattr(self, 'tools'):
+                self.tools.close()
+        finally:
+            self.store.close()
+
+    def poll(self):
+        """Broker latches persistence faults before either request/idle polling returns."""
+        self.tools.poll()
 
     def handle(self, request):
         request_id = request.get("request_id") if isinstance(request, dict) else None
         response = dict(protocol_version=1, request_id=request_id)
         try:
+            self.poll()
             if not isinstance(request, dict):
                 raise ServiceError("INVALID_REQUEST", "请求必须是 JSON 对象。")
             if request.get("protocol_version") != 1:
@@ -98,7 +109,8 @@ class CapabilityService:
                 for callback in self.after_commit:
                     callback()
             except BaseException:
-                self.db.execute("ROLLBACK")
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 raise
             response.update(ok=True, result=result)
         except ServiceError as error:
@@ -135,7 +147,7 @@ class CapabilityService:
 
     def dispatch(self, op, request, params):
         if op in ("health", "capabilities"):
-            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup"], storage="SQLCipher")
+            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup", "tools"], storage="SQLCipher")
         if op == "character.activate":
             character = text(params.get("character_id"), 200)
             self.db.execute("INSERT OR IGNORE INTO characters(id) VALUES(?)", (character,))
@@ -152,6 +164,8 @@ class CapabilityService:
             self.active.pop(character)
             return dict(retired=True)
         session = self.authorize(request)
+        if op.startswith('tool.'):
+            return self.tools.dispatch(op, session, params)
         paused = self.db.execute('SELECT paused FROM recovery_state WHERE character=?', (session['character'],)).fetchone()
         if paused and paused[0] and (op.startswith('context.') or op in ('attention.check','attention.reserve') or (op.startswith('memory.') and not session['management'])):
             raise ServiceError('RECOVERY_REVIEW_REQUIRED', '恢复内容尚未完成主人复审。', '在管理页核对最新删除记录并明确复审；暂停生成与发送。')
@@ -172,6 +186,7 @@ class CapabilityService:
         raise ServiceError("INVALID_REQUEST", "未知操作。")
 
     def invalidate(self, character):
+        self.tools.retire(character)
         self.bindings = {key: value for key, value in self.bindings.items() if value["character"] != character}
         recover_reservations(self.db, character)
 
@@ -224,7 +239,8 @@ class CapabilityService:
             raise ServiceError("PERMISSION_DENIED", "私聊主体必须与会话对象匹配。")
         token = uuid.uuid4().hex
         self.bindings[token] = dict(character=character, epoch=self.active[character], scope=scope,
-                                   principal=principal, management=management, owner=owner, token=token)
+                                   principal=principal, management=management, owner=owner, token=token,
+                                   platform=platform, account=account, conversation=conversation)
         return dict(session_binding=token)
 
     def record(self, row):

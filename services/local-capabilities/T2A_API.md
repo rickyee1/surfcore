@@ -4,7 +4,9 @@ Additive protocol v1 extension, baseline `e9d33b4`. Existing `context.*`, `atten
 
 ## Writer path
 
-Use the original trusted channel binding. `memory.episodes.pending {limit:20}` returns `{episodes,memory_epoch,index}`. Limit is 1–100. Only active episodes in the **exact** binding audience are queued, and only if that episode revision has no consumption marker. Another group/private channel/role and public content outside that channel do not enter the queue. A corrected episode revision can be considered anew. Migration summaries remain quarantined; this extension does not silently promote their audience.
+Use the original trusted channel binding. `memory.episodes.pending {limit:20}` returns `{episodes,auto_write,memory_epoch,index}`. Limit is 1–100. Only active episodes in the **exact** binding audience are queued, and only if that episode revision has no consumption marker. Another group/private channel/role and public content outside that channel do not enter the queue. A corrected episode revision can be considered anew. Migration summaries remain quarantined; this extension does not silently promote their audience.
+
+T2b Writer compatibility seam (after T2a acceptance): when auto-write is off, pending returns `auto_write:false,episodes:[]` without mutation or retrieval, so the host must not call a Writer model. Submit accepts 0–6 proposals; `proposals:[]` is a valid model decision that creates no assertion but atomically consumes the same validated source revisions on commit. Empty batches retain every source proof/epoch/consent/principal rule and idempotency; they cannot be used to bypass stale/deleted sources or pay for the same revision repeatedly.
 
 Submit at most six add/supersede/invalidate proposals with 1–20 unique source IDs:
 

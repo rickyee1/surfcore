@@ -1,11 +1,29 @@
 """Bounded JSONL stdio transport. stdout contains protocol responses only."""
 import argparse
 import json
+import queue
 import sys
+import threading
 from core import CapabilityService
 from storage import ServiceError
 
 MAX_LINE = 1_048_576
+
+
+def read_requests(stream, incoming):
+    """Only input I/O is threaded. Bounded queue; no SQLite or protocol output here."""
+    try:
+        while True:
+            line = stream.readline(MAX_LINE + 1)
+            if not line:
+                break
+            oversized = len(line) > MAX_LINE
+            if oversized:
+                while line and not line.endswith(b'\n'):
+                    line = stream.readline(MAX_LINE + 1)
+            incoming.put((line, oversized))
+    finally:
+        incoming.put(None)
 
 
 def main():
@@ -21,16 +39,27 @@ def main():
         service = CapabilityService(args.data_dir)
     except ServiceError as error:
         startup_error = error
+    incoming = queue.Queue(maxsize=32)
+    threading.Thread(target=read_requests, args=(sys.stdin.buffer, incoming), daemon=True, name='local-jsonl-input').start()
     try:
         while True:
-            line = sys.stdin.buffer.readline(MAX_LINE + 1)
-            if not line:
+            try:
+                item = incoming.get(timeout=0.05)
+            except queue.Empty:
+                if service and not startup_error:
+                    try:
+                        service.poll()
+                    except Exception:
+                        # Failure to persist authority state closes tools; never run fail-open.
+                        service.close()
+                        startup_error = ServiceError('SERVICE_UNAVAILABLE', '本机工具状态无法持久化。', '暂停工具和发送，检查磁盘与服务后重启。')
+                continue
+            if item is None:
                 break
+            line, oversized = item
             request = None
             try:
-                if len(line) > MAX_LINE:
-                    while line and not line.endswith(b"\n"):
-                        line = sys.stdin.buffer.readline(MAX_LINE + 1)
+                if oversized:
                     raise ValueError("oversized")
                 request = json.loads(line.decode("utf-8"), parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")))
                 if startup_error:

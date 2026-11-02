@@ -415,6 +415,7 @@ class BackupManager:
 
     def retire(self,character):
         recover_reservations(self.db,character)
+        self.service.tools.retire(character)
         def after_commit():
             self.service.bindings = {key:value for key,value in self.service.bindings.items() if value['character'] != character}
             self.service.active.pop(character,None)
