@@ -1,0 +1,6 @@
+# Optional local CPU semantic retrieval, separate from the SQLCipher-only core.
+sentence-transformers==5.7.0
+torch==2.15.0
+transformers==5.22.1
+numpy==2.5.2
+safetensors==0.8.0

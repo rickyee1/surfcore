@@ -91,5 +91,43 @@
     "t2b_compatibility_seam": "Root-authorized: zero-proposal batches still consume validated source revisions atomically/idempotently; pending returns auto_write and empty episodes when disabled, without writes.",
     "repair_attempt": 2,
     "repair": "Independent poll COMMIT failure counterexamples: stage in-memory lock publication and completion ACK/job removal until durable COMMIT; synchronous sticky persistence_fault and worker cancellation even if ROLLBACK fails; recovered storage first persists closed/new generation/unknown and invalidates exports. Same-process reset cannot clear fault; restart cannot revive old binding/results. No protocol parameter changes or additional dependencies."
+  },
+  "t2b_semantic": {
+    "task": "/root/capability_service T2b-P attempt1",
+    "baseline": "b31ce80f76b59ab45e7955b40590801f306c8b17",
+    "adaptation": "Conceptual adaptation of offline normalized Embedder, scoped vector retrieval and off-UI cache warming. Purpose-built SQLCipher cache and epoch/source authority with a bounded subprocess; no original module import, Qdrant store, network retry or plaintext vector database.",
+    "source_files": [
+      {
+        "path": "memory/embedder.py",
+        "sha256": "14643564fb6f35ccac17ef6b44f5c28bf1075db8497e8e8e4de305c0ac0e7eca"
+      },
+      {
+        "path": "memory/vector_store.py",
+        "sha256": "ab5e0b081a88b9aef33ea80ca5543f2baaf9226bdc1fc763d959c74adfac4b71"
+      },
+      {
+        "path": "memory/semantic_cache.py",
+        "sha256": "8267febbee873b188b1b80efeb440898a97b663c4cac6c57fbb3a53b86c7905a"
+      }
+    ],
+    "model": {
+      "id": "BAAI/bge-small-zh-v1.5",
+      "revision": "7999e1d3359715c523056ef9478215996d62a620",
+      "manifest": "semantic-model.json",
+      "dimensions": 512,
+      "source": "existing locally prepared cache; no download",
+      "offline": true,
+      "trust_remote_code": false,
+      "weights": "safetensors only"
+    },
+    "optional_dependencies": {
+      "sentence-transformers": "5.7.0",
+      "torch": "2.15.0",
+      "transformers": "5.22.1",
+      "numpy": "2.5.2",
+      "safetensors": "0.8.0"
+    },
+    "limits": "No JS/UI changes or actual user data; no inference until explicit enabled query/rebuild, empty query uses visible recent context. Page64, worker batch32, 3500 chars per segment, token-aware subchunks, candidate4096/source depth64/node256, one active slot and timeout120s. Tool grants unchanged.",
+    "license_note": "Model/asset license obligations remain those of the declared official revision; attribution here does not transfer upstream licensing."
   }
 }

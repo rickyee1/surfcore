@@ -36,7 +36,9 @@ class MemoryGovernance:
             self.db.execute('ROLLBACK')
             raise
 
-    def index(self, identifier):
+    def index(self, identifier, invalidate_semantic=True):
+        if invalidate_semantic and hasattr(self.service,'semantic'):
+            self.service.semantic.invalidate_source(identifier)
         self.db.execute('DELETE FROM memory_terms WHERE memory=?', (identifier,))
         row = self.db.execute("SELECT statement,status FROM memories WHERE id=?", (identifier,)).fetchone()
         if row and row['status'] == 'active':
@@ -46,7 +48,7 @@ class MemoryGovernance:
         query = 'SELECT id FROM memories' + (' WHERE character=?' if character else '')
         rows = self.db.execute(query, (character,) if character else ()).fetchall()
         for row in rows:
-            self.index(row['id'])
+            self.index(row['id'],invalidate_semantic=False)
         return dict(index='deterministic_keywords_v1', indexed=len(rows), semantic_vectors=False)
 
     def keyword_ids(self, session, query):
@@ -224,6 +226,8 @@ class MemoryGovernance:
 
     def on_delete(self, character, doomed):
         for identifier in doomed:
+            if hasattr(self.service,'semantic'):
+                self.service.semantic.invalidate_source(identifier)
             self.db.execute('DELETE FROM memory_terms WHERE memory=?', (identifier,))
             self.db.execute('DELETE FROM record_source_revisions WHERE memory=? OR source=?', (identifier, identifier))
             self.db.execute('DELETE FROM episode_consumption WHERE character=? AND episode=?', (character, identifier))

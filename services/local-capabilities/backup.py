@@ -383,6 +383,7 @@ class BackupManager:
         if params.get('review',False):
             self.review_proof(character,row,params)
         # Preserve current tombstones independently of snapshot age and replacement order.
+        self.service.semantic.clear_character(character)
         self.db.execute('INSERT OR IGNORE INTO sovereignty.tombstones SELECT * FROM tombstones WHERE character=?',(character,))
         self.db.executemany('INSERT OR IGNORE INTO sovereignty.tombstones VALUES(?,?,?)',
                             [(value['character'],value['kind'],value['digest']) for value in data['deletion_ledger']])
