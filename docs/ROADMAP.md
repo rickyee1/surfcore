@@ -2,6 +2,8 @@
 
 > 2026-11-02 fork：按用户方案实施本地能力服务及M0–M2接线，SurfCore保持唯一聊天编排。范围与未完成项见[LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。用户已授权保存到其fork，不包含上游发布、tag或Release。
 
+> 2026-11-02 追加授权：用户要求继续实现全部功能，扩展至原融合方案 M0–M5，并优先完成自主逛 B站后主动私聊主人。当前进入实施，尚未全量验收；任务、边界与退出条件见 [完整融合执行单](FULL_INTEGRATION_EXECUTION.md)。
+
 > 本文件是「做什么、按什么顺序做、什么时候该放弃」的唯一权威。**改路线先改这里**，再动代码。
 > 配套：开工动线见 [`../AGENTS.md`](../AGENTS.md)，踩坑见 [`PITFALLS.md`](PITFALLS.md)，交接见 [`HANDOFF.md`](HANDOFF.md)。
 

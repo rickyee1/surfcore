@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { errorResult, CapabilityError } from './supervisor.js';
+import { createBackupTransfer } from './backup-transfer.js';
 
 const ui = fs.readFileSync(new URL('./management.html', import.meta.url), 'utf8');
 function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value)); }
@@ -13,6 +14,7 @@ async function body(req) {
 // HttpOnly cookie + random header secret + exact Origin protect every admin call.
 export function createManagementHandler({ capabilities, base = '/local-capabilities', authorizePage = () => true }) {
   const sessions = new Map();
+  const backups = createBackupTransfer({ capabilities });
   return async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     try {
@@ -28,13 +30,18 @@ export function createManagementHandler({ capabilities, base = '/local-capabilit
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': `surfcore_local=${cookie}; HttpOnly; SameSite=Strict; Path=${base}`, 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'", 'referrer-policy': 'no-referrer' });
         res.end(ui.replace('__SESSION_TOKEN__', token).replaceAll('__API_BASE__', base)); return;
       }
-      if (url.pathname !== `${base}/api` || req.method !== 'POST') { json(res, 404, { ok: false, code: 'INVALID_REQUEST', error: '接口不存在。', hint: '打开本地记忆页面。' }); return; }
+      if (![`${base}/api`, `${base}/backup/import`, `${base}/backup/download`].includes(url.pathname) || req.method !== 'POST') { json(res, 404, { ok: false, code: 'INVALID_REQUEST', error: '接口不存在。', hint: '打开本地记忆页面。' }); return; }
       const origin = req.headers.origin;
       if (!origin || ![`http://${host}`, `https://${host}`].includes(origin)) throw new CapabilityError('PERMISSION_DENIED', '跨站操作已拒绝。', '刷新本地页面后重试。');
       const cookie = String(req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith('surfcore_local='))?.slice(15);
       const session = sessions.get(cookie);
       if (!session || session.expires < Date.now() || !equal(session.token, req.headers['x-surfcore-session'])) throw new CapabilityError('PERMISSION_DENIED', '本地管理会话已过期。', '刷新此页面后重试。');
+      if (url.pathname === `${base}/backup/import`) {
+        if (!String(req.headers['content-type']).startsWith('application/octet-stream')) throw new CapabilityError('INVALID_REQUEST', '请选择加密备份文件。');
+        json(res, 200, { ok: true, result: await backups.upload(req) }); return;
+      }
       if (!String(req.headers['content-type']).startsWith('application/json')) throw new CapabilityError('INVALID_REQUEST', '请求必须是 JSON。');
+      if (url.pathname === `${base}/backup/download`) { await backups.download(req, res, await body(req)); return; }
       const data = await body(req); let result;
       if (data.op === 'status') result = capabilities.status();
       else if (data.op === 'backend.set') result = await capabilities.setMode(data.params?.mode);
@@ -47,6 +54,6 @@ export function createManagementHandler({ capabilities, base = '/local-capabilit
         result = { count: records.length, audience_scope: 'quarantine', source: 'legacy_summary', records };
       } else result = await capabilities.management(data.op, data.params || {});
       json(res, 200, { ok: true, result });
-    } catch (e) { json(res, e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
+    } catch (e) { if (res.headersSent) res.destroy(); else json(res, e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
   };
 }

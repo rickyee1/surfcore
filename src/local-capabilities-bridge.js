@@ -94,6 +94,23 @@ export class LocalChannelBridge {
   }
   enterSession(id) { this.origin.enterWith(this.sessions.get(id) || null); }
   enterToken(token) { this.origin.enterWith(this.tokens.get(token) || null); }
+  async withIntent(intentId, { guard, deliver }) {
+    if (!this.guarded() || this.mode() !== 'local') throw channelError('COMPANION_LOCAL_REQUIRED', '自主陪伴只在 local 后端运行。');
+    const owner = String(this.config().ownerQQ || '');
+    const key = `private:${owner}`; const channel = this.channels.get(key);
+    if (!channel || channel.kind !== 'qq-private' || channel.peer !== owner) throw channelError('BINDING_INVALID', '尚无主人的可信私聊身份，请先由主人发来一条私聊。');
+    let record;
+    try {
+      const claim = await this.request('intent.claim', channel, { intentId });
+      record = { key, channel, context: claim.context, sessionId: `companion:${intentId}`, proactive: true, outreachId: claim.outreachId, intent: true, expiresAt: claim.expiresAt, guard: () => guard(channel) };
+      this.sessions.set(record.sessionId, record);
+      return await this.origin.run(record, () => deliver(claim.text, key));
+    } catch (error) {
+      error.deliveryOutcome = record?.transportAttempted && error.deliveryOutcome !== 'failed' ? 'unknown' : 'failed';
+      if (record) await this.request('intent.finish', channel, { context: record.context, params: { outcome: error.deliveryOutcome } }).catch(() => {});
+      throw error;
+    } finally { if (record) this.sessions.delete(record.sessionId); }
+  }
   async validateOrigin() {
     const record = this.origin.getStore();
     if (!record) throw channelError('BINDING_INVALID', '本地模式工具缺少可信代次。');
@@ -106,6 +123,8 @@ export class LocalChannelBridge {
     }
     const record = this.origin.getStore();
     if (!record || record.key !== key || this.sessions.get(record.sessionId) !== record) throw channelError('BINDING_INVALID', '发送缺少本轮可信上下文或试图跨会话发送。');
+    if (record.intent && record.consumed) throw channelError('COMPANION_INTENT_INVALID', '本次主动投递已消费，不能重发。');
+    if (record.intent) record.consumed = true;
     const extra = { context: record.context };
     if (record.uncertain) throw channelError('DELIVERY_UNKNOWN', '本轮存在无法确认的发送，禁止补发或备用路径。');
     await this.request('validate', record.channel, extra);
@@ -120,17 +139,23 @@ export class LocalChannelBridge {
     if (!reserved.reserved) throw channelError('ATTENTION_BLOCKED', `本轮未获得发送额度：${reserved.reason || '额度已占用'}`);
     let attempted = false;
     try {
+      // Account/friend lookup may wait on OneBot. It must finish BEFORE the last
+      // context/run-state/policy checks, so changes during that wait can revoke this send.
+      await record.guard?.();
       await this.request('validate', record.channel, extra);
       const recheck = await this.request('attention.check', record.channel, { ...extra, params: { ...params, reservation_id: reserved.reservation_id } });
       if (!recheck.allowed) throw channelError('ATTENTION_BLOCKED', `发送前检查拒绝：${recheck.reason || '设置已变化'}`);
+      if (record.intent && (!Number.isFinite(record.expiresAt) || Date.now() >= record.expiresAt)) throw channelError('COMPANION_STOPPED', '主动投递凭据已过期，本轮没有发送。');
       attempted = true;
+      record.transportAttempted = true;
       const result = await deliver();
       await this.request('attention.finalize', record.channel, { ...extra, params: { ...params, outcome: 'sent' } });
       return result;
     } catch (error) {
       // Any attempted transport can have delivered despite a timeout. Never replay/fallback.
-      if (attempted) record.uncertain = true;
-      await this.request('attention.finalize', record.channel, { ...extra, params: { ...params, outcome: attempted ? 'unknown' : 'failed' } }).catch(() => {});
+      const outcome = attempted && error.deliveryOutcome !== 'failed' ? 'unknown' : 'failed';
+      if (outcome === 'unknown') record.uncertain = true;
+      await this.request('attention.finalize', record.channel, { ...extra, params: { ...params, outcome } }).catch(() => {});
       throw error;
     }
   }
@@ -139,6 +164,7 @@ export class LocalChannelBridge {
     return this.send(key, async () => {
       const res = await this.fetchImpl(url, options);
       const body = await res.clone().json().catch(() => null);
+      if (body?.status === 'failed' && Number.isInteger(body.retcode) && body.retcode !== 0) throw Object.assign(channelError('DELIVERY_REJECTED', 'QQ 平台明确拒绝了本次发送。'), { deliveryOutcome: 'failed' });
       if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) throw channelError('DELIVERY_UNKNOWN', 'QQ 发送未获得成功回执，已保守计账，不会补发。');
       return res;
     });

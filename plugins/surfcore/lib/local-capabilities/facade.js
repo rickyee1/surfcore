@@ -66,18 +66,25 @@ export class LocalCapabilities {
     if (this.mode !== 'local' || context.binding.key !== `${current.id}:${current.epoch}`) throw new CapabilityError('STALE_CHARACTER', '角色或后端已切换，本次回复已取消。');
     return this.supervisor.raw('context.validate', context.binding, { memory_epoch: context.memory_epoch });
   }
-  async ingest(context, source_event_id, text) {
+  async ingest(context, source_event_id, text, { derivedFrom = [] } = {}) {
+    if (!Array.isArray(derivedFrom) || derivedFrom.length > 20 || derivedFrom.some(source => !source || typeof source.id !== 'string' || !source.id || source.id.length > 200 || !Number.isSafeInteger(source.revision) || source.revision < 1) || new Set(derivedFrom.map(source => source.id)).size !== derivedFrom.length) throw new CapabilityError('INVALID_REQUEST', '派生来源版本无效。');
     await this.validate(context);
     // Persist intent first: an unknown IPC outcome must never permit rollback to legacy.
     this.state.written = true; this.persist();
-    try { return await this.supervisor.raw('memory.ingest', context.binding, { source_event_id, text, source_refs: [`event:${source_event_id}`], expected_memory_epoch: context.memory_epoch }); }
+    try { return await this.supervisor.raw('memory.ingest', context.binding, { source_event_id, text, source_refs: [`event:${source_event_id}`], expected_memory_epoch: context.memory_epoch, ...(derivedFrom.length ? { derived_from: derivedFrom.map(source => source.id), source_revisions: Object.fromEntries(derivedFrom.map(source => [source.id, source.revision])) } : {}) }); }
     catch (e) { if (e.code === 'AUTO_WRITE_DISABLED') return { skipped: true, stored: false, memory_epoch: context.memory_epoch }; throw e; }
   }
   async management(op, params = {}) {
-    const allowed = new Set(['memory.query','memory.detail','memory.correct','memory.suspend','memory.delete','memory.export','memory.settings','memory.migrate','attention.configure']);
+    const allowed = new Set(['memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
     if (!allowed.has(op)) throw new CapabilityError('PERMISSION_DENIED', '管理操作未开放。');
-    if (['memory.migrate','memory.correct','memory.delete','memory.suspend'].includes(op)) { this.state.written = true; this.persist(); }
-    return this.call({ kind: 'management' }, op, params);
+    if (['memory.migrate','memory.correct','memory.delete','memory.suspend','memory.resume','backup.restore.commit'].includes(op)) { this.state.written = true; this.persist(); }
+    try {
+      return await this.call({ kind: 'management' }, op, params);
+    } finally {
+      // A lost restore response may still mean the database was replaced. Never
+      // reuse a cached binding, or automatically retry an old generated reply.
+      if (op === 'backup.restore.commit') { this.active = null; this.bindings.clear(); }
+    }
   }
   async setQqOwner(mapping) {
     if (mapping !== null && (!/^\d{1,20}$/.test(String(mapping.account)) || !/^\d{1,20}$/.test(String(mapping.peer)))) throw new CapabilityError('INVALID_REQUEST', '请输入有效的 QQ 账号与私聊联系人编号。');

@@ -3468,6 +3468,100 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         }) : null);
     }
 
+    function CompanionCard() {
+      const [data, setData] = useState(null);
+      const [form, setForm] = useState(null);
+      const [error, setError] = useState(null);
+      const [working, setWorking] = useState("load");
+      const [stopping, setStopping] = useState(false);
+      const [preview, setPreview] = useState(null);
+      const [notice, setNotice] = useState("");
+      const dirty = useRef(false);
+      const statusVersion = useRef(0);
+      const failure = (e) => setError({ code: e.code || "COMPANION_UI_FAILED", error: e.message || e.error || "自主陪伴操作失败。", hint: e.hint || "检查 DSH 与本地能力状态，然后刷新重试。" });
+      const request = useCallback(async (url, options = {}, timeoutMs = 15000) => {
+        const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try { return await api(url, { ...options, signal: controller.signal }); }
+        catch (e) { if (controller.signal.aborted) throw { code: "COMPANION_REQUEST_TIMEOUT", message: "请求超时，执行结果尚未确认。", hint: "刷新状态核对，必要时停止；不要重复点击补发。" }; throw e; }
+        finally { clearTimeout(timer); }
+      }, []);
+      const applyStatus = useCallback((result, reset = false) => {
+        statusVersion.current++;
+        setData(result);
+        if (reset) dirty.current = false;
+        setForm((old) => dirty.current && old ? old : { ...result.config });
+      }, []);
+      const refresh = useCallback(async (clearError = false) => {
+        const version = ++statusVersion.current;
+        if (clearError === true) setError(null);
+        try { const result = await request("/companion/status"); if (version === statusVersion.current) applyStatus(result); }
+        catch (e) { if (version === statusVersion.current) failure(e); }
+      }, [applyStatus, request]);
+      useEffect(() => { void refresh().finally(() => setWorking("")); }, [refresh]);
+      useEffect(() => {
+        const timer = setInterval(() => { void refresh(); }, 10000);
+        return () => clearInterval(timer);
+      }, [refresh]);
+      const edit = (key, value) => { dirty.current = true; setForm((old) => ({ ...old, [key]: value })); };
+      const save = async () => {
+        setWorking("save"); setError(null); setNotice("");
+        try { const result = await request("/companion/config", { method: "POST", body: form }); applyStatus(result, true); setNotice(result.config.enabled ? "已启用：只向绑定主人私聊，仍受统一注意力限制。" : "已保存，当前保持关闭。"); }
+        catch (e) { failure(e); } finally { setWorking(""); }
+      };
+      const readPreview = async () => {
+        setWorking("preview"); setError(null); setNotice(""); setPreview(null);
+        try { setPreview(await request("/companion/preview", { method: "POST", body: {} }, 75000)); }
+        catch (e) { failure(e); } finally { setWorking(""); }
+      };
+      const run = async () => {
+        setWorking("run"); setError(null); setNotice("正在执行一轮；符合所有限制时，可能私聊绑定主人。");
+        try { await request("/companion/run", { method: "POST", body: {} }, 240000); setNotice("本轮已完成，请查看最近结果。"); }
+        catch (e) { failure(e); setNotice(""); }
+        finally { setWorking(""); await refresh(); }
+      };
+      const stop = async () => {
+        setStopping(true); setError(null);
+        try { const result = await request("/companion/stop", { method: "POST", body: {} }); applyStatus(result, true); setNotice("已关闭并取消在途轮次；已提交平台的消息请以最近结果为准，不会自动补发。"); }
+        catch (e) { failure(e); } finally { setStopping(false); }
+      };
+      const link = (bvid, title) => /^BV[1-9A-HJ-NP-Za-km-z]{10}$/.test(String(bvid || ""))
+        ? h("a", { href: `https://www.bilibili.com/video/${bvid}`, target: "_blank", rel: "noopener noreferrer" }, title || bvid)
+        : h("span", null, title || "（无有效来源链接）");
+      const last = data?.last;
+      const outcome = last?.outcome === "pending" && !data?.running ? "上轮结果待核对（不会补发）" : ({ pending: "处理中", sent: "已发给主人", failed: "失败，未补发", unknown: "结果未确认（不会补发）" }[last?.outcome] || last?.outcome || "尚未运行");
+      const problem = error || data?.error;
+      const disabled = Boolean(working || stopping || data?.running);
+      const source = preview?.source;
+      return h("div", { className: "qbw-card", style: { width: "100%", boxSizing: "border-box", marginBottom: "10px" } },
+        h("h4", null, "自主浏览与主人私聊"),
+        h("p", null, "自主浏览 B站公开内容、形成想法，再按限制私聊已绑定主人。不会通过这里发布 B站评论、动态或私信。"),
+        h("div", { className: "qbw-kv" }, h("span", null, "当前状态"), h("span", null, data ? `${data.config?.enabled ? "已开启" : "已关闭"} · ${data.running || working === "run" ? "运行中" : "空闲"}` : "读取中…")),
+        h("div", { className: "qbw-kv" }, h("span", null, "下次浏览"), h("span", null, data?.nextBrowseAt ? fmtTime(data.nextBrowseAt) : "尚未排定")),
+        h("div", { className: "qbw-kv" }, h("span", null, "最近结果"), h("span", null, last ? `${fmtTime(last.at)} · ${outcome}` : outcome)),
+        last?.bvid ? h("p", null, "上次来源：", link(last.bvid), last.basis ? h("span", { className: "qbw-hint" }, ` · ${last.basis}`) : null) : null,
+        last && (last.materialStored === false || last.thoughtStored === false) ? h("p", { className: "qbw-hint" }, "本轮自动写入关闭，未声称材料或想法已保存。") : null,
+        data && !data.local ? h("p", { className: "qbw-hint" }, "当前未使用 local 后端，执行前请先检查本地能力。") : null,
+        h("p", { className: "qbw-hint" }, "统一注意力中的主动联系开关也需开启；安静时段、专注、冷却、预算和主人白名单始终生效。", " ", h("a", { href: "/dsh-surfcore/local-capabilities", target: "_blank", rel: "noopener noreferrer" }, "打开本地能力管理")),
+        form ? h("div", null,
+          h("label", { className: "qbw-kv" }, h("span", null, "启用（仅绑定主人 QQ 私聊）"), h("input", { type: "checkbox", checked: form.enabled === true, disabled, onChange: (e) => edit("enabled", e.target.checked) })),
+          [["intervalMinutes", "浏览间隔（分钟）", 5, 1440], ["dailyMax", "每天最多主动尝试", 1, 20], ["cooldownMinutes", "联系冷却（分钟）", 5, 10080]].map(([key, label, min, max]) => h("label", { className: "qbw-kv", key }, h("span", null, label), h("input", { className: "qbw-input", type: "number", "aria-label": label, min, max, step: 1, value: form[key], disabled, onChange: (e) => edit(key, Number(e.target.value)), style: { width: "150px", boxSizing: "border-box" } }))),
+          h(Btn, { onClick: save, disabled }, working === "save" ? "保存中…" : form.enabled ? "保存并启用（仅主人私聊）" : "保存设置（保持关闭）")) : null,
+        h("div", { className: "qbw-actions" },
+          h(Btn, { kind: "qbw-btn2", onClick: () => refresh(true), disabled: Boolean(working && working !== "run") || stopping }, "刷新状态"),
+          h(Btn, { kind: "qbw-btn2", onClick: readPreview, disabled: !data || !data.local || disabled }, working === "preview" ? "读取中…" : "只读预览材料"),
+          h(Btn, { onClick: run, disabled: !data?.config?.enabled || !data?.local || disabled }, working === "run" ? "运行中…" : "立即运行（可能发给主人）"),
+          h(Btn, { kind: "qbw-btn2", onClick: stop, disabled: stopping || Boolean(working && working !== "run") || (!data?.config?.enabled && !data?.running && working !== "run") }, stopping ? "停止中…" : "停止并关闭")),
+        notice ? h("p", { role: "status", className: "qbw-hint" }, notice) : null,
+        problem ? h("div", { role: "alert", className: "qbw-err" }, [problem.code, problem.error, problem.hint].filter(Boolean).join(" · ")) : null,
+        source ? h("div", { style: { marginTop: "10px" } },
+          h("h4", null, "公开材料预览（不调用模型，不发送）"),
+          link(source.bvid, source.title),
+          h("p", { className: "qbw-hint" }, `作者：${source.author || "未提供"}`),
+          h("p", null, source.basis || preview.basis || "材料范围未提供，不能视为完整视频内容。"),
+          h("p", { style: { whiteSpace: "pre-wrap", maxHeight: "150px", overflow: "auto" } }, source.description || "（暂无简介）"),
+          source.subtitleStatus === "available" && source.subtitle ? h("details", null, h("summary", null, "查看已读取的官方字幕节选"), h("textarea", { readOnly: true, value: source.subtitle, "aria-label": "官方字幕节选", rows: 6, style: { width: "100%", boxSizing: "border-box" } })) : h("p", { className: "qbw-hint" }, "未取得官方字幕；只依据标题、作者和简介，不代表看过完整视频。")) : null);
+    }
+
     function BiliDraftCard() {
       const [input, setInput] = useState("");
       const [source, setSource] = useState(null);
@@ -3627,6 +3721,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           overview,
         }),
         accountCard,
+        h(CompanionCard),
         h(BiliDraftCard),
         h(AdminCard, { admin, onChange: setAdmin, qqPrivate, qqAllowAll, toast }),
         h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
@@ -6264,8 +6359,8 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     exports.QQ_FIELDS = QQ_FIELDS;
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;
-    // 仅供 Node 契约测试验证路径归一化；浏览器运行时不使用。
-    exports.__test = { pathKeys, setPath, BiliTab };
+    // 仅供 Node 契约及组件渲染测试；浏览器运行时不使用。
+    exports.__test = { pathKeys, setPath, BiliTab, CompanionCard };
     return module.exports;
   },
 });

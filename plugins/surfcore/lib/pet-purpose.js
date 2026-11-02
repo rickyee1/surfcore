@@ -403,6 +403,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
 
   /** 跑一轮桌宠主动搭话。force=true 时跳过排程/安静时段/空闲判断（设置页「试一次」）。 */
   async function runOnce({ force = false, previewOnly = false } = {}) {
+    if (chat.localCapabilities?.guarded) return { ok: false, code: 'COMPANION_COORDINATOR_REQUIRED', error: 'local 模式主动联系由统一自主陪伴协调器执行。', hint: '使用自主陪伴状态、预览和运行入口；桌宠被动对话仍可使用。' };
     if (running) return { ok: false, reason: 'busy' };
     const p = purposeConfig();
     if (!p.chatEnabled) return { ok: false, reason: 'chat-disabled', error: '桌宠对话已关闭' };
@@ -600,6 +601,7 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
   }
 
   async function tick() {
+    if (chat.localCapabilities?.guarded) return;
     const p = purposeConfig();
     if (p.carrier !== 'pet' || p.config.enabled === false || !p.chatEnabled) return;
     if (focusNow()) {

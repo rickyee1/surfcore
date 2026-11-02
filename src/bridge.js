@@ -5466,6 +5466,26 @@ async function main() {
           }
           return;
         }
+        // Host-issued one-shot deliveries carry no caller-selected text or target.
+        if (url.pathname === '/api/companion/readiness' || url.pathname === '/api/companion/deliver') {
+          if (req.headers.origin || req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
+            sendJson({ ok: false, code: 'PERMISSION_DENIED', error: '自主投递仅允许可信宿主内部调用。', hint: '使用 SurfCore 自主陪伴入口。' }, 403); return;
+          }
+          const ready = companionReadiness();
+          if (req.method === 'GET' && url.pathname === '/api/companion/readiness') { sendJson(ready, ready.ready ? 200 : 409); return; }
+          if (req.method !== 'POST' || url.pathname !== '/api/companion/deliver') { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '请求方法无效。', hint: '使用自主陪伴入口。' }, 405); return; }
+          const body = await readBody();
+          if (Object.keys(body).length !== 1 || !/^[a-f0-9]{48}$/.test(body.intentId || '')) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '必须提供宿主签发的单次投递凭据。', hint: '不得指定目标或正文；重新预览并运行。' }, 400); return; }
+          if (!ready.ready) { sendJson(ready, 409); return; }
+          try {
+            const delivery = await localChannels.withIntent(body.intentId, {
+              guard: companionSendGuard,
+              deliver: (message, key) => onebotSend('private', key.split(':')[1], message),
+            });
+            sendJson({ ok: true, outcome: 'sent', delivery: { messageId: delivery?.message_id ?? null } });
+          } catch (e) { sendJson({ ok: false, code: e.code || 'COMPANION_DELIVERY_UNKNOWN', outcome: e.deliveryOutcome || 'unknown', error: e.error || '主动投递结果未确认，本轮不会重发。', hint: e.hint || '核对平台实际消息；本轮不会重放或切换渠道。' }, 409); }
+          return;
+        }
         // ── 目的机制：状态 / 预览 / 立刻试一次（控制台专用，智能体不可见）─────
         if (req.method === 'GET' && url.pathname === '/api/purpose/status') {
           ensurePurposeDay(purposeState, Date.now());
@@ -9251,6 +9271,38 @@ async function main() {
     return body.data;
   }
 
+  function companionReadiness() {
+    const owner = String(cfg.ownerQQ || ''); const key = `private:${owner}`;
+    const trusted = localChannels.channels.get(key);
+    const roleActive = readRoleState().mode !== 'silent';
+    const explicit = (cfg.allow?.private || []).some(id => String(id) === owner);
+    const st = socialV2.conversations.get(key);
+    const lastAt = Math.max(Number(st?.lastIncomingAt) || 0, Number(st?.lastAiReplyAt) || 0);
+    const checks = [
+      [localBackendGuarded(), 'COMPANION_LOCAL_REQUIRED', '主动协调器需要本地能力后端。'],
+      [currentMode === 'chat', 'COMPANION_CHAT_REQUIRED', '自主主人私聊当前只接入 chat 模式。'],
+      [roleActive && !socialV2.paused && !petFocusEnabled(), 'COMPANION_PAUSED', '角色、对话暂停或专注模式正在阻止主动联系。'],
+      [snowlumaHealth.connected && snowlumaHealth.accountOnline === true && dshReady, 'COMPANION_QQ_NOT_READY', 'QQ、账号或 DSH 尚未在线。'],
+      [owner && explicit && allowed('private', Number(owner), cfg), 'OWNER_NOT_ALLOWED', '主人不在明确的私聊白名单中。'],
+      [trusted && trusted.kind === 'qq-private' && String(selfUserId || '') === trusted.account, 'BINDING_INVALID', '缺少当前机器人与主人之间的可信入站身份。'],
+    ];
+    const blocked = checks.find(([ok]) => !ok);
+    return { ok: !blocked, ready: !blocked, mode: currentMode, ownerIdleMs: lastAt ? Date.now() - lastAt : Number.MAX_SAFE_INTEGER, ...(blocked ? { code: blocked[1], error: blocked[2], hint: '核对 chat 模式、角色/专注状态、账号在线和主人私聊白名单；由主人先发一条消息。' } : {}) };
+  }
+  async function companionSendGuard(channel) {
+    const state = companionReadiness();
+    if (!state.ready || localChannels.channels.get(`private:${channel.peer}`)?.account !== channel.account || String(cfg.ownerQQ) !== channel.peer) throw channelError(state.code || 'BINDING_INVALID', state.error || '主人或机器人身份已变化。', state.hint);
+    // Confirm the actual account before transport. No fallback when identity/friend checks fail.
+    let login; let friends;
+    try {
+      login = await withTimeout(bot.raw('get_login_info', {}), 6000, 'companion identity');
+      friends = await withTimeout(bot.raw('get_friend_list', {}), 6000, 'companion friend');
+    } catch { throw channelError('COMPANION_QQ_NOT_READY', '发送前无法确认当前账号或好友关系，本轮已停止。'); }
+    const info = login?.data || login; const list = Array.isArray(friends) ? friends : friends?.data;
+    if (String(info?.user_id || '') !== channel.account || !Array.isArray(list) || !list.some(item => String(item.user_id) === channel.peer)) throw channelError('BINDING_INVALID', '发送前账号或主人好友关系不匹配，本轮已停止。');
+    const final = companionReadiness(); if (!final.ready) throw channelError(final.code, final.error, final.hint);
+  }
+
   // 直接发任意 OneBot 消息段（卡片/分享卡用）。文本发送仍走 sendToQQ，
   // 这样限速、审计和会话守卫不被绕过。
   async function onebotSendSegments(kind, id, segments) {
@@ -11558,6 +11610,7 @@ async function main() {
   }
 
   async function runPurposeOnce({ force = false, preview = false } = {}) {
+    if (localBackendGuarded()) return { ok: false, code: 'COMPANION_COORDINATOR_REQUIRED', error: 'local 模式主动联系由统一自主陪伴协调器执行。', hint: '使用 SurfCore 自主陪伴状态、预览和运行入口。' };
     const owner = purposeOwnerId();
     if (!owner) return { ok: false, reason: 'no-owner', error: '未配置管理员 QQ（ownerQQ）' };
     if (cfg.purpose?.enabled === false && !preview && !force) return { ok: false, reason: 'disabled' };
@@ -11800,6 +11853,7 @@ async function main() {
   }
 
   async function purposeTick() {
+    if (localBackendGuarded()) return;
     if (purposeEvaluating || purposeRun || purposeWarming) return;
     // 载体切到桌宠后，桥接不再自动出发（手动「立即试一次」/ 桌宠离线回落仍可走 runPurpose）。
     if (purposeCarrierNow() === 'pet') return;
@@ -11818,6 +11872,7 @@ async function main() {
    * 而不是等 30 分钟后的第一枪。
    */
   async function warmPurposeState() {
+    if (localBackendGuarded()) return;
     if (purposeWarming) return;
     if (currentMode !== 'reserved2') return;
     if (purposeCarrierNow() === 'pet') return;
@@ -11956,6 +12011,7 @@ async function main() {
    * @returns {Promise<{ok:boolean, retry?:boolean, reason?:string}>}
    */
   async function fireMorningGreeting({ manual = false } = {}) {
+    if (localBackendGuarded()) return { ok: false, code: 'COMPANION_COORDINATOR_REQUIRED', error: 'local 模式主动联系由统一自主陪伴协调器执行。', hint: '使用自主陪伴入口。' };
     const conf = cfg.greetings?.morning;
     if (!conf) return { ok: false, reason: '未配置' };
     const uin = String(conf.uin ?? '');
@@ -12665,6 +12721,7 @@ async function main() {
   }
 
   async function checkProactiveAt() {
+    if (localBackendGuarded()) return;
     const conf = cfg.chat?.proactive;
     if (!conf || conf.enabled === false || !dshReady) return;
     if (currentMode !== 'chat') return;
@@ -14399,6 +14456,7 @@ async function main() {
   }
 
   function scheduleProactiveCheckV2(key) {
+    if (localBackendGuarded()) return;
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
     if (!isSessionAllowedInCurrentMode(key)) return;

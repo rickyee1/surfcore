@@ -41,7 +41,7 @@ import {
   deleteCharacter, manualSnapshot, migrateIfNeeded, restoreCharacterSnapshot, switchToCharacter,
   updateCharacterFromPayload,
 } from './characters.js';
-import { activeMemoryPaths, activePersonaLayers, activePlatformStateDir, readCurrentCharacter, touchCharacter } from '../../../src/character-persona.js';
+import { activeMemoryPaths, activePersonaLayers, activePlatformStateDir, readCurrentCharacter, readPersonaLayerText, touchCharacter } from '../../../src/character-persona.js';
 import { automationSnapshot } from './automation.js';
 import {
   backupFile, listBackups, pathSummary,
@@ -70,6 +70,7 @@ import { ExtensionHost } from './extensions.js';
 import { isLoopbackReq, json, readBody, sameOrigin } from './http-guard.js';
 import { startScheduler } from './scheduler.js';
 import { createBiliDrafts, createBiliDraftHandler } from './bili-drafts.js';
+import { createAutonomousCompanion, createCompanionHandler } from './autonomous-companion.js';
 import { createTokenBudgetService } from './token-budget.js';
 import { scanPluginCompatibility } from './compat.js';
 import { createGateEventStore } from '../../../src/gate-events.js';
@@ -684,8 +685,10 @@ export function apply(ctx) {
       handler: async (req, res) => {
         if (!isLoopbackReq(req)) { json(res, 403, { ok: false, error: '只接受本机回环访问' }); return; }
         if (req.method !== 'GET' && !sameOrigin(req)) { json(res, 403, { ok: false, error: '跨站请求被拒绝' }); return; }
-        if (req.method !== 'GET' && !String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          json(res, 415, { ok: false, error: '写操作必须是 application/json' });
+        const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+        const encryptedImport = kind === 'exact' && pathname === '/dsh-surfcore/local-capabilities/backup/import';
+        if (req.method !== 'GET' && contentType !== 'application/json' && !(encryptedImport && contentType === 'application/octet-stream')) {
+          json(res, 415, { ok: false, code: 'INVALID_REQUEST', error: '写操作的内容类型无效。', hint: encryptedImport ? '请从本地记忆页面选择加密备份文件。' : '请使用 application/json 请求。' });
           return;
         }
         try {
@@ -712,9 +715,21 @@ export function apply(ctx) {
   const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
   route('exact', '/dsh-surfcore/local-capabilities', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/api', localManagement);
+  // T2a mount only: management owns backup method/session/Origin validation.
+  route('exact', '/dsh-surfcore/local-capabilities/backup/import', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/backup/download', localManagement);
   const biliDraftHandler = createBiliDraftHandler(createBiliDrafts({ ctx }));
   route('exact', `${API_PREFIX}/bili/drafts/read`, biliDraftHandler);
   route('exact', `${API_PREFIX}/bili/drafts/generate`, biliDraftHandler);
+  const companion = createAutonomousCompanion({
+    ctx, capabilities: local, channelHandler: localChannel, stateDir: path.join(LOCAL_ROOT, 'companion'), callBridge, tokenBudget,
+    environment: () => ({ roleActive: readJson(path.join(QQ_STATE_DIR(), 'current-role.json'), { mode: 'active' })?.mode === 'active', focused: petChat.focusEnabled(), paused: false, platformEnabled: readUnified().config?.platforms?.start?.qq === true }),
+    persona: () => [readPersonaLayerText('core'), readPersonaLayerText('tone')].filter(Boolean).join('\n'),
+    purposeConfig: () => readQqConfig().config?.purpose || {},
+    log: pluginLog,
+  });
+  const companionHandler = createCompanionHandler(companion);
+  for (const action of ['status', 'config', 'preview', 'run', 'stop']) route('exact', `${API_PREFIX}/companion/${action}`, companionHandler);
 
   // ── 概览 ────────────────────────────────────────────────────────────────
   async function overview() {
@@ -3448,6 +3463,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
   petHostTimer.unref?.();
   // 目的机制（桌宠载体）：carrier=pet 时由这里每 60 秒 tick；carrier=qq 时它自己会退出。
   try { petPurpose.start(); } catch (error) { pluginLog('[pet-purpose] 启动失败：', String(error?.message ?? error)); }
+  companion.start();
 
   // 启动后异步做的事（不阻塞插件激活）
   void activateExtensions();
@@ -3474,6 +3490,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     try { scheduler?.stop?.(); } catch {}
     try { updates.dispose(); } catch {}
     try { petPurpose.stop?.(); } catch {}
+    companion.dispose();
     void disposeLocalCapabilities();
     if (petHostTimer) clearInterval(petHostTimer);
     try { sessionEventOff?.(); } catch {}

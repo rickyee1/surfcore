@@ -463,6 +463,8 @@ assert.match(rendered, /暂无记忆（不代表未登录）/); assert.doesNotMa
 assert.equal((rendered.match(/B站 登录账号/g) || []).length, 1, 'login card must appear once');
 const advanced = nodes(initial).find(node => node.type?.name === 'AdvancedSettings');
 assert.ok(advanced); assert.doesNotMatch(words(advanced), /B站 登录账号/, 'login status must not be hidden in advanced settings');
+assert.equal(nodes(initial).filter(node => node.type === client.__test.CompanionCard).length, 1, 'Companion card must be present once on the Bili page');
+assert.equal(nodes(advanced).filter(node => node.type === client.__test.CompanionCard).length, 0, 'Companion controls must be visible outside advanced settings');
 assert.match(words(renderBili(saved, { fish: { ok: true, account: { name: '测试昵称', mid: '10001' } } })), /登录有效：测试昵称/);
 const failed = renderBili(saved, { fish: { ok: false, error: '核查失败', hint: '检查网络后重试' } });
 assert.ok(nodes(failed).some(node => node.props.role === 'alert' && /检查网络后重试/.test(words(node))));
