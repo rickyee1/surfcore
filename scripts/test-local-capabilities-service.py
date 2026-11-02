@@ -97,14 +97,14 @@ class Behavior(unittest.TestCase):
     def test_context_sources_exact_lookup_survives_intervening_ingestion(self):
         first = self.good(self.ingest(self.pet, "burst-first", "First actual source"))
         for number in range(25):
-            self.good(self.ingest(self.pet, f"burst-{number}", f"Later source {number}"))
+            last=self.good(self.ingest(self.pet, f"burst-{number}", f"Later source {number}"))
         result = self.good(self.call("context.sources", dict(source_event_ids=["burst-first", "burst-24"]), self.pet))
-        self.assertEqual(result["sources"], [dict(source_event_id="burst-first",status="active",text="First actual source",revision=1),
-            dict(source_event_id="burst-24",status="active",text="Later source 24",revision=1)])
+        self.assertEqual(result["sources"], [dict(id=first['id'],source_event_id="burst-first",status="active",text="First actual source",revision=1),
+            dict(id=last['id'],source_event_id="burst-24",status="active",text="Later source 24",revision=1)])
         self.assertEqual(result["memory_epoch"], self.epoch())
         self.good(self.call("memory.correct", dict(id=first["id"],statement="Corrected actual source",expected_revision=1), self.owner))
         result = self.good(self.call("context.sources", dict(source_event_ids=["burst-first"]), self.pet))
-        self.assertEqual(result["sources"][0], dict(source_event_id="burst-first",status="active",text="Corrected actual source",revision=2))
+        self.assertEqual(result["sources"][0], dict(id=first['id'],source_event_id="burst-first",status="active",text="Corrected actual source",revision=2))
         self.assertEqual(result["memory_epoch"], self.epoch())
 
     def test_bounded_context_query_prioritizes_user_corrections_then_newest(self):
@@ -136,6 +136,7 @@ class Behavior(unittest.TestCase):
             result = self.good(self.call("context.sources", dict(source_event_ids=["source-suspended","source-deleted","never-stored"]), self.pet))
             self.assertEqual([row["status"] for row in result["sources"]], ["suspended","deleted","missing"])
             self.assertTrue(all("text" not in row for row in result["sources"]))
+            self.assertTrue(all("id" not in row for row in result["sources"]))
             self.assertNotIn("revision", result["sources"][2])
 
     def test_context_sources_does_not_disclose_other_audiences_or_characters(self):

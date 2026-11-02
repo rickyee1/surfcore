@@ -2,6 +2,7 @@
 import ctypes
 import os
 import re
+import uuid
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ class Store:
         self.conn = None
         self.lock = None
         root = Path(directory).resolve()
+        self.directory = root
         root.mkdir(parents=True, exist_ok=True)
         try:
             self.lock = (root / "service.lock").open("a+b")
@@ -90,6 +92,33 @@ class Store:
             self.conn.execute("PRAGMA journal_mode=DELETE")
             self.conn.execute("PRAGMA secure_delete=ON")
             self.conn.executescript(SCHEMA)
+            self._key = key
+            # Independent append-only deletion authority is never replaced by restore.
+            prior_lineage = self.conn.execute("SELECT value FROM store_metadata WHERE key='lineage'").fetchone()
+            lineage = prior_lineage[0] if prior_lineage else uuid.uuid4().hex
+            self.conn.execute('ATTACH DATABASE ? AS sovereignty KEY "x\'' + key.hex() + '\'"', (str(root / "sovereignty.db"),))
+            self.conn.execute("PRAGMA sovereignty.journal_mode=DELETE")
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sovereignty.metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS sovereignty.tombstones(character TEXT NOT NULL,kind TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(character,kind,digest));
+                CREATE TABLE IF NOT EXISTS sovereignty.backups(id TEXT PRIMARY KEY,character TEXT NOT NULL,sha256 TEXT NOT NULL,lineage TEXT NOT NULL);
+            """)
+            ledger_lineage = self.conn.execute("SELECT value FROM sovereignty.metadata WHERE key='lineage'").fetchone()
+            if ledger_lineage and ledger_lineage[0] != lineage:
+                raise ServiceError("KEY_UNAVAILABLE", "删除记录与活动库身份不匹配。", "保留两份文件，使用隔离恢复流程核对。")
+            self.conn.execute("INSERT OR IGNORE INTO store_metadata VALUES('lineage',?)", (lineage,))
+            self.conn.execute("INSERT OR IGNORE INTO sovereignty.metadata VALUES('lineage',?)", (lineage,))
+            self.conn.execute("INSERT OR IGNORE INTO sovereignty.metadata VALUES('instance',?)", (uuid.uuid4().hex,))
+            self.conn.execute("INSERT OR IGNORE INTO sovereignty.metadata VALUES('trusted',?)", ('0' if prior_lineage else '1',))
+            self.conn.execute("INSERT OR IGNORE INTO sovereignty.tombstones SELECT * FROM main.tombstones")
+            self.conn.execute("INSERT OR IGNORE INTO main.tombstones SELECT * FROM sovereignty.tombstones")
+            if self.conn.execute("SELECT value FROM sovereignty.metadata WHERE key='trusted'").fetchone()[0] != '1':
+                instance = self.conn.execute("SELECT value FROM sovereignty.metadata WHERE key='instance'").fetchone()[0]
+                self.conn.execute("""INSERT OR REPLACE INTO recovery_state
+                    SELECT c.id,1,'deletion_ledger_missing' FROM characters c WHERE NOT EXISTS (
+                      SELECT 1 FROM recovery_reviews r JOIN recovery_current a ON a.character=r.character
+                      AND a.restore_id=r.restore_id AND a.snapshot_digest=r.snapshot_digest
+                      WHERE r.character=c.id AND r.ledger_instance=? AND a.ledger_instance=?)""",(instance,instance))
             # A crashed or closed sender may already have delivered. Never release it on restart.
             self.conn.execute("BEGIN IMMEDIATE")
             try:
@@ -116,6 +145,10 @@ class Store:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS characters(id TEXT PRIMARY KEY, memory_epoch INTEGER NOT NULL DEFAULT 0, auto_write INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS store_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS recovery_state(character TEXT PRIMARY KEY,paused INTEGER NOT NULL,reason TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS recovery_current(character TEXT PRIMARY KEY,restore_id TEXT NOT NULL,snapshot_digest TEXT NOT NULL,ledger_instance TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS recovery_reviews(character TEXT PRIMARY KEY,restore_id TEXT NOT NULL,snapshot_digest TEXT NOT NULL,ledger_instance TEXT NOT NULL,approved_epoch INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, character TEXT NOT NULL, scope TEXT NOT NULL, principal TEXT NOT NULL,
  statement TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL, pinned INTEGER NOT NULL,
  event_hash TEXT NOT NULL, content_hash TEXT NOT NULL, sources TEXT NOT NULL, derived TEXT NOT NULL, kind TEXT NOT NULL,

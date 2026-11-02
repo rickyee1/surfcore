@@ -43,5 +43,21 @@
       "role": "only database driver; SQLCipher required"
     }
   ],
-  "license_note": "Source adaptation attribution recorded here; no claim that external app/assets licensing is transferred."
+  "license_note": "Source adaptation attribution recorded here; no claim that external app/assets licensing is transferred.",
+  "t2a": {
+    "baseline": "e9d33b481025b73e8398b0d76548413ab35b3aa8",
+    "scope": "source-bound assertions, writer consumption, deterministic keyword index, independent deletion authority, password SQLCipher logical snapshot and isolated restore",
+    "adaptation": "Extends Luyao Episode/Assertion/Revision and untrusted Writer concepts already attributed above; purpose-built scoped transactions and backup recovery. No source project modules are linked or modified.",
+    "new_dependencies": "None; standard library hashlib.scrypt, json, pathlib, uuid plus existing sqlcipher3==0.6.2",
+    "limits": "No model calls/vector model, UI integration, tools Broker, device execution, or full persona/assets export in T2a",
+    "repair_attempt": 3,
+    "acceptance_invariants": [
+      "Exact writable audience and recursive active provenance for automatic revision",
+      "Deletion clears source/target/result/content-linked proposal payloads and results",
+      "Review bound to active restore, snapshot digest, current memory epoch and ledger instance",
+      "Per-role review acknowledgement survives restart without globally trusting a lost ledger",
+      "Additive active source ID and optional source revision proofs for T1 channel ingestion"
+    ],
+    "narrow_seam": "Attempt3: before AUTO_WRITE_DISABLED run non-writing role-wide tombstone/input/source checks; exact stored sources must be active and recursively visible. Same-role foreign/quarantine event existence denies transient fallback without body/id lookup; other-role events do not affect it. Enabled per-scope persistence unchanged."
+  }
 }

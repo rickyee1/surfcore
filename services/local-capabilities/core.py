@@ -48,6 +48,26 @@ class CapabilityService:
         self.clock = clock
         self.active = {}
         self.bindings = {}
+        self.after_commit = []
+        try:
+            from memory_governance import MemoryGovernance
+            self.governance = MemoryGovernance(self)
+            from backup import BackupManager
+            self.backups = BackupManager(self)
+            # A manually restored older main file must still obey the independent ledger.
+            self.db.execute('BEGIN IMMEDIATE')
+            victims = self.db.execute('SELECT DISTINCT f.character,f.memory FROM fingerprints f JOIN sovereignty.tombstones t ON t.character=f.character AND t.kind=f.kind AND t.digest=f.digest JOIN memories m ON m.id=f.memory WHERE m.status!=?', ('deleted',)).fetchall()
+            for victim in victims:
+                self.delete_tree(victim['character'], victim['memory'])
+                self.bump(victim['character'])
+            self.db.execute('COMMIT')
+        except Exception as error:
+            if self.db.in_transaction:
+                self.db.execute('ROLLBACK')
+            self.close()
+            if isinstance(error, ServiceError):
+                raise
+            raise ServiceError('SERVICE_UNAVAILABLE','记忆治理初始化失败。','保留数据和删除记录，检查版本与磁盘状态后重试。') from None
 
     def close(self):
         self.store.close()
@@ -70,10 +90,13 @@ class CapabilityService:
             params = request.get("params", {})
             if not isinstance(params, dict):
                 raise ServiceError("INVALID_REQUEST", "params 必须是对象。")
+            self.after_commit = []
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 result = self.dispatch(op, request, params)
                 self.db.execute("COMMIT")
+                for callback in self.after_commit:
+                    callback()
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
@@ -112,7 +135,7 @@ class CapabilityService:
 
     def dispatch(self, op, request, params):
         if op in ("health", "capabilities"):
-            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention"], storage="SQLCipher")
+            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup"], storage="SQLCipher")
         if op == "character.activate":
             character = text(params.get("character_id"), 200)
             self.db.execute("INSERT OR IGNORE INTO characters(id) VALUES(?)", (character,))
@@ -129,6 +152,13 @@ class CapabilityService:
             self.active.pop(character)
             return dict(retired=True)
         session = self.authorize(request)
+        paused = self.db.execute('SELECT paused FROM recovery_state WHERE character=?', (session['character'],)).fetchone()
+        if paused and paused[0] and (op.startswith('context.') or op in ('attention.check','attention.reserve') or (op.startswith('memory.') and not session['management'])):
+            raise ServiceError('RECOVERY_REVIEW_REQUIRED', '恢复内容尚未完成主人复审。', '在管理页核对最新删除记录并明确复审；暂停生成与发送。')
+        if op.startswith('memory.proposals.') or op in ('memory.episodes.pending', 'memory.resume', 'memory.index.rebuild'):
+            return self.governance.dispatch(op, session, params)
+        if op.startswith('backup.'):
+            return self.backups.dispatch(op, session, params)
         if op == "context.validate":
             if params.get("memory_epoch") != self.epoch(session["character"]):
                 raise ServiceError("STALE_CONTEXT", "记忆版本已改变。", "重新检索并生成回复，禁止发送旧上下文。")
@@ -169,6 +199,7 @@ class CapabilityService:
                 source["status"] = "suspended" if row["status"] == "invalidated" else row["status"]
                 source["revision"] = row["revision"]
                 if row["status"] == "active":
+                    source["id"] = row["id"]
                     source["text"] = row["statement"]
             sources.append(source)
         return dict(sources=sources, memory_epoch=self.epoch(session["character"]))
@@ -199,7 +230,8 @@ class CapabilityService:
     def record(self, row):
         return dict(id=row["id"], statement=row["statement"], revision=row["revision"], status=row["status"],
                     pinned=bool(row["pinned"]), source_refs=json.loads(row["sources"]), derived_from=json.loads(row["derived"]),
-                    audience_scope=row["scope"], kind=row["kind"])
+                    audience_scope=row["scope"], kind=row["kind"],
+                    source_revisions={proof['source']:proof['revision'] for proof in self.db.execute('SELECT source,revision FROM record_source_revisions WHERE memory=?',(row['id'],))})
 
     def visible_rows(self, session):
         # Audience restriction is part of SQL, before matching/ranking. Management is an explicit separate path.
@@ -213,6 +245,9 @@ class CapabilityService:
         if row["id"] in trail:
             return False
         trail = trail | {row["id"]}
+        proofs = self.db.execute('SELECT source,revision FROM record_source_revisions WHERE memory=?', (row['id'],)).fetchall()
+        if any(proof['source'] not in permitted or permitted[proof['source']]['revision'] != proof['revision'] for proof in proofs):
+            return False
         return all(source in permitted and permitted[source]["status"] == "active" and
                    self.visible(permitted[source], permitted, trail) for source in json.loads(row["derived"]))
 
@@ -231,16 +266,23 @@ class CapabilityService:
                 raise ServiceError("INVALID_REQUEST", "查询过长。")
             rows = self.visible_rows(session)
             permitted = {row["id"]: row for row in rows}
+            mode = params.get('search_mode', 'substring')
+            if mode not in ('substring', 'keyword'):
+                raise ServiceError('INVALID_REQUEST', '检索模式必须是 substring 或 keyword。')
+            candidates = self.governance.keyword_ids(session, query) if mode == 'keyword' else None
             records = [self.record(row) for row in rows if (session["management"] or self.visible(row, permitted))
-                       and query.casefold() in row["statement"].casefold()]
+                       and ((row['id'] in candidates) if candidates is not None else query.casefold() in row["statement"].casefold())]
             return dict(memories=records[:limit], memory_epoch=self.epoch(character), character_epoch=session["epoch"])
         if op in ("ingest", "propose"):
             if params.get("expected_memory_epoch") != self.epoch(character):
                 raise ServiceError("STALE_CONTEXT", "自动写入的记忆版本已过期。", "丢弃旧提案并重新检索。")
-            if not self.db.execute("SELECT auto_write FROM characters WHERE id=?", (character,)).fetchone()[0]:
-                raise ServiceError("AUTO_WRITE_DISABLED", "已停用自动记忆整理。", "由主人在记忆管理页开启。")
             if op == "propose" and (params.get("id") or params.get("target_id") or params.get("operation", "add") != "add"):
                 raise ServiceError("PERMISSION_DENIED", "自动提案只能新增有来源的经历，不能覆盖用户修订。")
+            if not self.db.execute("SELECT auto_write FROM characters WHERE id=?", (character,)).fetchone()[0]:
+                # Disabled persistence does not bless deleted/invalid input as a
+                # never-stored live source. Run only the existing read-side checks.
+                self.ingest(session, params, validate_only=True)
+                raise ServiceError("AUTO_WRITE_DISABLED", "已停用自动记忆整理。", "由主人在记忆管理页开启。")
             return self.ingest(session, params)
         self.management(session)
         if op == "settings":
@@ -281,38 +323,66 @@ class CapabilityService:
         else:
             raise ServiceError("INVALID_REQUEST", "未知记忆操作。")
         epoch = self.bump(character)
+        self.governance.index(row['id'])
         return dict(memory=self.record(self.target(character, params)), memory_epoch=epoch)
 
     def fingerprint(self, memory, character, kind, hashed):
         self.db.execute("INSERT OR IGNORE INTO fingerprints VALUES(?,?,?,?)", (memory, character, kind, hashed))
 
-    def ingest(self, session, params, migration=False):
+    def ingest(self, session, params, migration=False, *, validate_only=False):
         character = session["character"]
         statement = text(params.get("text"), 12000)
         event = text(params.get("source_event_id"), 500)
         refs = string_list(params.get("source_refs", []))
         derived = string_list(params.get("derived_from", []))
+        proofs = params.get('source_revisions') if 'source_revisions' in params else None
+        if 'source_revisions' in params:
+            if not isinstance(proofs,dict) or set(proofs) != set(derived) or len(set(derived)) != len(derived):
+                raise ServiceError('INVALID_REQUEST','来源修订必须恰好对应全部唯一派生来源。')
+            for revision in proofs.values():
+                integer(revision,1,2**53-1)
         fingerprints = [("event", digest(event)), ("content", digest(statement))] + [("source", digest(ref)) for ref in refs]
         for kind, hashed in fingerprints:
             if self.db.execute("SELECT 1 FROM tombstones WHERE character=? AND kind=? AND digest=?", (character, kind, hashed)).fetchone():
                 raise ServiceError("DELETED_SOURCE", "此来源或内容已被用户删除。", "不能重放删除内容；请提供新的独立来源。")
-        existing = self.db.execute("SELECT id FROM memories WHERE character=? AND scope=? AND event_hash=?", (character, session["scope"], digest(event))).fetchone()
-        if existing:
+        existing = self.db.execute("SELECT id,derived,status FROM memories WHERE character=? AND scope=? AND event_hash=?", (character, session["scope"], digest(event))).fetchone()
+        if existing and proofs is None and not validate_only:
             return dict(id=existing[0], duplicate=True, memory_epoch=self.epoch(character))
-        permitted = {row["id"]: row for row in self.visible_rows(session)}
+        if validate_only and not existing and self.db.execute('SELECT 1 FROM memories WHERE character=? AND event_hash=? LIMIT 1',(character,digest(event))).fetchone():
+            raise ServiceError('PERMISSION_DENIED','此来源事件不满足当前会话的临时使用条件。','刷新来源状态；不要把不可见或隔离来源当作新材料。')
+        view = dict(session,management=False) if validate_only else session
+        permitted = {row["id"]: row for row in self.visible_rows(view)} if derived or (validate_only and existing) else {}
+        if validate_only and existing:
+            if existing['status']=='deleted':
+                raise ServiceError('DELETED_SOURCE','此来源已被用户删除。','不能将删除来源作为临时新材料重放。')
+            if existing['status']!='active' or not self.visible(existing,permitted):
+                raise ServiceError('PERMISSION_DENIED','此来源事件不满足当前会话的临时使用条件。','刷新来源状态；不要把停用或继承不可见的来源当作新材料。')
         for source in derived:
             if source not in permitted or permitted[source]["status"] != "active" or not self.visible(permitted[source], permitted):
                 raise ServiceError("PERMISSION_DENIED", "派生来源对当前受众不可见。")
-        identifier = uuid.uuid4().hex
+            if proofs is not None and permitted[source]['revision'] != proofs[source]:
+                raise ServiceError('VERSION_CONFLICT','派生来源修订已经改变。','重新读取原始来源，不得用新epoch认可旧内容。')
+        if existing:
+            if proofs is not None:
+                stored_proofs={row['source']:row['revision'] for row in self.db.execute('SELECT source,revision FROM record_source_revisions WHERE memory=?',(existing['id'],))}
+                if set(json.loads(existing['derived'])) != set(derived) or stored_proofs != proofs:
+                    raise ServiceError('VERSION_CONFLICT','重复事件的来源绑定与已存记录不同。','保留原记录；重新评估并使用新的事件标识。')
+            return dict(id=existing['id'],duplicate=True,memory_epoch=self.epoch(character))
         status = params.get("status", "active") if migration else "active"
         if status not in ("active", "suspended", "deleted", "invalidated"):
             raise ServiceError("INVALID_REQUEST", "迁移状态无效。")
+        if validate_only:
+            return dict(validated=True)
+        identifier = uuid.uuid4().hex
         self.db.execute("INSERT INTO memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (identifier, character, session["scope"], session["principal"], statement, 1, status, 0, digest(event), digest(statement), encode(refs), encode(derived), "legacy_summary" if migration else "episode"))
         self.db.execute("INSERT INTO revisions VALUES(?,?,?,?)", (identifier, 1, statement, "migration" if migration else "ingest"))
         for kind, hashed in fingerprints:
             self.fingerprint(identifier, character, kind, hashed)
+        if proofs is not None:
+            self.db.executemany('INSERT INTO record_source_revisions VALUES(?,?,?)',[(identifier,source,revision) for source,revision in proofs.items()])
         if status == "deleted":
             self.delete_tree(character, identifier)
+        self.governance.index(identifier)
         return dict(id=identifier, duplicate=False, memory_epoch=self.bump(character))
 
     def affected_records(self, character, identifier, shared_provenance=False):
@@ -346,8 +416,10 @@ class CapabilityService:
         doomed = self.affected_records(character, identifier, shared_provenance=True)
         for item in doomed:
             self.db.execute("INSERT OR IGNORE INTO tombstones SELECT character,kind,digest FROM fingerprints WHERE memory=? AND character=?", (item, character))
+            self.db.execute("INSERT OR IGNORE INTO sovereignty.tombstones SELECT character,kind,digest FROM fingerprints WHERE memory=? AND character=?", (item, character))
             self.db.execute("DELETE FROM revisions WHERE memory=?", (item,))
             self.db.execute("UPDATE memories SET statement='',sources='[]',derived='[]',status='deleted',revision=revision+1 WHERE id=? AND character=? AND status!='deleted'", (item, character))
+        self.governance.on_delete(character, doomed)
 
     def migrate(self, session, params):
         migration = text(params.get("migration_id"), 200)
