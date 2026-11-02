@@ -446,12 +446,48 @@ try {
   {
     const { execFileSync } = await import('node:child_process');
     const helper = path.resolve('scripts/apply-update.mjs');
-    const runHelper = (name, stagedVersion, toVersion) => {
+    const runHelper = async (name, stagedVersion, toVersion, { ownedCollision = false, modifiedCollision = false } = {}) => {
       const target = makeTarget(name, '0.7.0', { withMeta: true });
       const staging = path.join(base, `${name}-staging`);
       fs.mkdirSync(path.join(staging, 'release'), { recursive: true });
       fs.writeFileSync(path.join(staging, 'package.json'), JSON.stringify({ name: 'surfcore', version: stagedVersion }));
-      fs.writeFileSync(path.join(staging, 'release', 'install-manifest.json'), JSON.stringify({ version: stagedVersion, files: {} }));
+      // Deterministic NTFS collision: same size/mtime is not evidence of equal bytes.
+      const stamp = new Date('2026-01-02T03:04:06.000Z');
+      const targetPackage = path.join(target, 'package.json'), sourcePackage = path.join(staging, 'package.json');
+      for (const file of [targetPackage, sourcePackage]) fs.utimesSync(file, stamp, stamp);
+      const beforeTarget = fs.statSync(targetPackage, { bigint: true }), beforeSource = fs.statSync(sourcePackage, { bigint: true });
+      const packageCollision = { sameSize: beforeTarget.size === beforeSource.size, sameMtime: beforeTarget.mtimeNs === beforeSource.mtimeNs };
+      const files = { 'package.json': crypto.createHash('sha256').update(fs.readFileSync(sourcePackage)).digest('hex') };
+      let ownedExpected = null, distinctChangeTime = false;
+      const protectedFiles = [
+        'config.json', 'bili.config.json', 'updates-pending.json', 'nested/config.json',
+        ...['state', 'backups', 'node_modules', '.git', 'logs', 'staging', 'pet', 'characters', 'voice-packs', 'tmp-update-test']
+          .map(directory => `${directory}/user.json`),
+      ];
+      if (ownedCollision) {
+        ownedExpected = 'export const value = "NEW";\n';
+        fs.writeFileSync(path.join(staging, 'owned.js'), ownedExpected);
+        fs.utimesSync(path.join(staging, 'owned.js'), stamp, stamp);
+        // Same last-write time with different NTFS ChangeTime is a separate
+        // robocopy "Modified" category. Force it instead of racing the clock.
+        if (modifiedCollision) await new Promise(resolve => setTimeout(resolve, 25));
+        fs.writeFileSync(path.join(target, 'owned.js'), 'export const value = "OLD";\n');
+        fs.utimesSync(path.join(target, 'owned.js'), stamp, stamp);
+        const a = fs.statSync(path.join(staging, 'owned.js'), { bigint: true }), b = fs.statSync(path.join(target, 'owned.js'), { bigint: true });
+        assert.equal(a.size, b.size); assert.equal(a.mtimeNs, b.mtimeNs);
+        distinctChangeTime = a.ctimeNs !== b.ctimeNs;
+        if (modifiedCollision) assert.equal(distinctChangeTime, true);
+        assert.notEqual(fs.readFileSync(path.join(staging, 'owned.js'), 'utf8'), fs.readFileSync(path.join(target, 'owned.js'), 'utf8'));
+        files['owned.js'] = crypto.createHash('sha256').update(ownedExpected).digest('hex');
+        fs.writeFileSync(path.join(target, 'user-only.txt'), 'SYNTHETIC_USER_FILE_KEEP');
+        for (const relative of protectedFiles) {
+          for (const directory of [staging, target]) fs.mkdirSync(path.dirname(path.join(directory, relative)), { recursive: true });
+          fs.writeFileSync(path.join(target, relative), `SYNTHETIC_USER_KEEP:${relative}`);
+          fs.writeFileSync(path.join(staging, relative), `SYNTHETIC_STAGED_IGNORE:${relative}`);
+        }
+        fs.mkdirSync(path.join(staging, 'empty-directory'));
+      }
+      fs.writeFileSync(path.join(staging, 'release', 'install-manifest.json'), JSON.stringify({ version: stagedVersion, files }));
       const stateDir = path.join(base, `${name}-state`);
       fs.mkdirSync(stateDir, { recursive: true });
       const pendingFile = path.join(stateDir, 'updates-pending.json');
@@ -464,16 +500,42 @@ try {
       try {
         execFileSync(process.execPath, [helper, '--pending', pendingFile], { stdio: 'ignore' });
       } catch (e) { code = e.status ?? 1; }
-      return { target, stateDir, pendingFile, code };
+      return { target, stateDir, pendingFile, code, packageCollision, ownedExpected, distinctChangeTime, protectedFiles };
     };
 
-    const bad = runHelper('verify-mismatch', '9.9.8', '9.9.9');
+    // Same package version would hide an old script unless the copy itself is checked.
+    const collision = await runHelper('same-metadata-owned', '0.7.0', '0.7.0', { ownedCollision: true });
+    ok(collision.packageCollision.sameSize && collision.packageCollision.sameMtime, '助手：固定同大小同时间戳夹具');
+    ok(collision.code === 0, '助手：元数据相同文件复制成功', String(collision.code));
+    ok(fs.readFileSync(path.join(collision.target, 'owned.js'), 'utf8') === collision.ownedExpected, '助手：版本相同也必须替换不同正文的代码文件');
+    ok(fs.readFileSync(path.join(collision.target, 'user-only.txt'), 'utf8') === 'SYNTHETIC_USER_FILE_KEEP', '助手：保留源包没有的用户文件');
+    ok(fs.readFileSync(path.join(collision.target, 'config.json'), 'utf8') === 'SYNTHETIC_USER_KEEP:config.json', '助手：仍排除用户config.json');
+    ok(fs.readFileSync(path.join(collision.target, 'state', 'user.json'), 'utf8') === 'SYNTHETIC_USER_KEEP:state/user.json', '助手：仍排除用户state目录');
+    ok(fs.statSync(path.join(collision.target, 'empty-directory')).isDirectory(), '助手：仍复制空目录');
+    const installed = JSON.parse(fs.readFileSync(path.join(collision.target, '.installed-manifest.json'), 'utf8'));
+    ok(installed.files['owned.js'] === crypto.createHash('sha256').update(fs.readFileSync(path.join(collision.target, 'owned.js'))).digest('hex'), '助手：实际目标正文匹配已安装清单');
+
+    const modified = await runHelper('modified-metadata-owned', '0.7.0', '0.7.0', { ownedCollision: true, modifiedCollision: true });
+    ok(modified.distinctChangeTime, '助手：固定同size/mtime但不同ChangeTime的Modified夹具');
+    ok(modified.code === 0, '助手：Modified类别正常完成', String(modified.code));
+    ok(fs.readFileSync(path.join(modified.target, 'owned.js'), 'utf8') === modified.ownedExpected, '助手：Modified类别必须替换正文，不能仅凭同版本成功');
+    const modifiedInstalled = JSON.parse(fs.readFileSync(path.join(modified.target, '.installed-manifest.json'), 'utf8'));
+    ok(modifiedInstalled.files['owned.js'] === crypto.createHash('sha256').update(fs.readFileSync(path.join(modified.target, 'owned.js'))).digest('hex'), '助手：Modified实际正文必须匹配安装清单');
+    for (const relative of modified.protectedFiles) {
+      ok(fs.readFileSync(path.join(modified.target, relative), 'utf8') === `SYNTHETIC_USER_KEEP:${relative}`, `助手：Modified复制仍排除${relative}`);
+    }
+    ok(fs.readFileSync(path.join(modified.target, 'user-only.txt'), 'utf8') === 'SYNTHETIC_USER_FILE_KEEP', '助手：Modified复制保留目标独有用户文件');
+    ok(fs.statSync(path.join(modified.target, 'empty-directory')).isDirectory(), '助手：Modified复制仍包含空目录');
+
+    const bad = await runHelper('verify-mismatch', '9.9.8', '9.9.9');
     ok(bad.code !== 0, '助手：版本不符时非 0 退出', String(bad.code));
     ok(fs.existsSync(`${bad.pendingFile}.failed`), '助手：写 .failed 证据');
     const jf = JSON.parse(fs.readFileSync(`${bad.pendingFile}.failed`, 'utf8'));
     ok(jf.code === 'verify.version-mismatch', '助手：code=verify.version-mismatch', String(jf.code));
+    ok(JSON.parse(fs.readFileSync(path.join(bad.target, 'package.json'), 'utf8')).version === '9.9.8', '助手：复制不同包后仍拒绝错误期望版本');
 
-    const okRun = runHelper('verify-ok', '9.9.9', '9.9.9');
+    const okRun = await runHelper('verify-ok', '9.9.9', '9.9.9');
+    ok(okRun.packageCollision.sameSize && okRun.packageCollision.sameMtime, '助手：版本升级也固定同大小同时间戳');
     ok(okRun.code === 0, '助手：版本一致时成功退出', String(okRun.code));
     const applied = fs.readdirSync(path.join(okRun.stateDir, 'updates-applied')).filter((f) => f.endsWith('.json'));
     ok(applied.length === 1, '助手：写应用记录');

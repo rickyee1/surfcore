@@ -81,7 +81,10 @@ function copyZip(staging, target) {
   const exFiles = ['config.json', 'bili.config.json', 'updates-pending.json'];
   const argv = [
     staging, target,
-    '/E',
+    // Same size/mtime can still contain different release bytes (ZIP timestamp precision).
+    // /IS copies "Same" files; /IM covers equal size/mtime with different ChangeTime.
+    // /E still preserves target-only user files; exclusions below remain authoritative.
+    '/E', '/IS', '/IM',
     '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:2', '/W:1',
     '/XD', ...exDirs,
     '/XF', ...exFiles,
