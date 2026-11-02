@@ -125,6 +125,7 @@ await check('factory stages only selected seed, real native MCP paths and isolat
   const args = hostArgs('stage'), staged = stageHost({ ...args, dshPort: 12340, consolePort: 12341 });
   assert.equal(fs.readFileSync(path.join(staged.env.DSH_HOME, '.credentials.yaml'), 'utf8'), 'INVALID_YAML_IS_OPAQUE_COPY_ONLY');
   const patch = JSON.parse(fs.readFileSync(path.join(staged.env.DSH_HOME, 'profiles/web/cordis.patch.yml'), 'utf8'));
+  assert.deepEqual(patch.find(row => row.id === 'agent-default-model')?.config, staged.selection);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(staged.env.DSH_HOME, 'profiles/web/package.json'), 'utf8')).dsh.profile.bundles, ['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app','surfcore']);
   assert.equal(patch[0].insert.filter(e => e.name === '@deepseek-ai/dsh-mcp-client').length, 3); assert.equal(staged.config.biliBridge.enabled, false); assert.equal(staged.config.purpose.enabled, false); assert.equal(staged.config.socialV2.voice.enabled, false);
 });

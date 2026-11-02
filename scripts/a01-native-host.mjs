@@ -66,7 +66,8 @@ export async function apply(ctx) {
   const persona = fs.readFileSync(c.personaFile, 'utf8');
   const made = chars.createCharacter({ id: 'a01-role', name: '小岚', personaText: persona, source: 'A01_SYNTHETIC' });
   chars.switchCharacter(made.character.id);
-  await ctx.get('agentDefaultModel').saveSelection(c.selection);
+  const selection = ctx.get('agentDefaultModel').currentSelection();
+  if (['provider', 'model', 'reasoningEffort'].some(key => selection[key] !== c.selection[key])) throw fault('MODEL_SELECTION_CHANGED', 'The isolated profile must select the frozen model before startup.');
   let phase = 'startup', inputWindow = null;
   const observation = observeLlm(ctx.get('llm'), { tags: () => ({ phase, inputWindow }) }), toolEvents = [], turnEvents = [];
   const off = ctx.on('session/event', (session, event) => {

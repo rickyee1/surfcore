@@ -1,4 +1,4 @@
-# A01 原生双版本评测 harness（T6-A01 attempt2）
+# A01 原生双版本评测 harness（T6-A01 attempt3）
 
 执行者 `/root/tools_ui`；工作区 `D:/luyao_companion_v0_1/surfcore-luyao`。只新增 `scripts/a01-*.mjs`、`scripts/fixtures/a01-native/` 和本文。未修改 bridge、pet、DSH 配置或冻结的30场景 JSON；未启动真实 DSH、读取真实凭据正文、调用模型或连接 QQ/B站。本交付是可评审的 runner/factory，不是 A01 体验通过证据。
 
@@ -58,3 +58,11 @@ node scripts/a01-native-runner.mjs assess --plan <冻结plan.private.json> --pac
 - 验证：18项确定性checks通过，其中评分伪PASS矩阵13类拒绝、实际assess CLI空结果拒绝；VM提取执行原版和fork真实maybeAutoStartBridge函数，以及真实updates.startAutoCheck配置表达式，验证pet零桥接/QQ仅runner一个owner/更新关闭。持有子进程退出和错PID/lock/root/URL均拒绝。fake CLI进程生命周期和真实原版归档仍通过，不冒充真实DSH验证。
 - 完整/窄检查、实际退出码及剩余全仓发布清单问题见 `.local/evidence/a01/checks.json` 和 `attempt2-*.log`；完整新增差异 `full.diff`、相对attempt1最小修复 `repair.diff`、哈希 `manifest.json`。
 - 原版真实tiny smoke、实际模型参数/usage观察、120场景和人工盲评仍NOT_VERIFIED。先独立验收attempt2，再由root做固定原版1pet/1QQ smoke；不自动重试、不将缺失运行移出分母。本执行者只负责9个原有交付文件，未触碰root新增语义文件。
+
+## attempt3：真实宿主加载事务修补
+
+主会话接管局部 runtime 装配修补，不重置尝试计数。已保留第一次原版 smoke 的失败分母和输出：宿主启动超时，零模型请求，`DSH_START_NOT_VERIFIED`。只启动、不调用模型的隔离诊断 v3 证明 apply 已进入且停在 `agentDefaultModel.saveSelection` 前后边界，ready HTTP405；安装包 ConfigEditor 明确与 Loader 热更新串行，apply 内 await 配置修改会等待当前加载事务。
+
+选择在 factory 的 `cordis.patch.yml` 预置完整 `agent-default-model.config`，host apply 仅检查当前 provider/model/reasoningEffort 与冻结选择一致。与启动后异步改配置相比，这条路线没有模型短暂错选，也不改原版 native producer。独立 diagnostic v4 同样 20 秒观察窗口得到 ready HTTP200/JSON；确定性 18 项仍通过，现有失败记录不删除。代码与证据 `.local/evidence/a01/attempt3-startup/`；原版有模型 tiny smoke 和完整120仍待运行，禁止把启动成功称作 A01 体验通过。
+
+改动层级为测试 factory/host 的加载事务，生产程序无改动，无真实平台/设备；所有模型材料仍 copy-only。备份在 attempt3-startup/before。回滚三个脚本后新建隔离 trial，不覆盖旧试验。交接：局部测试基础设施 patch、18 检查与真实零模型启动通过、需独立验收和真实 native 两场景后才全量；保持版本号不变。

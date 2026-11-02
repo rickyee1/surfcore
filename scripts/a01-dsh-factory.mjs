@@ -32,7 +32,9 @@ export function stageHost({ trialDir, repo, scene, trialId, version, seedDir, co
   fs.symlinkSync(plugin, path.join(profile, 'node_modules/surfcore'), process.platform === 'win32' ? 'junction' : 'dir');
   save(path.join(profile, 'package.json'), { name: 'a01-isolated-profile', private: true, dependencies: { surfcore: `link:${plugin.replaceAll('\\','/')}` }, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app','surfcore'] } } });
   const mcp = [['mcp-snowluma','snowluma','mcp-snowluma-safe.js'],['mcp-snowluma-host','snowluma-host','mcp-host-server.js'],['mcp-web-search-safe','web-search-safe','mcp-web-search-safe.js']].map(([id, serverName, script]) => ({ id, name: '@deepseek-ai/dsh-mcp-client', config: { serverName, transport: 'stdio', command: process.execPath, args: [path.join(repo, 'src', script)], toolCallTimeoutMs: 725000 } }));
-  save(path.join(profile, 'cordis.patch.yml'), [{ insert: [...mcp, { id: 'a01-native-host', name: pathToFileURL(path.join(here, 'a01-native-host.mjs')).href, config: {} }] }]); // JSON is valid YAML.
+  // Configure before Loader activation. Awaiting configEditor from a plugin's
+  // apply() waits on the same Loader transaction and prevents routes becoming ready.
+  save(path.join(profile, 'cordis.patch.yml'), [{ insert: [...mcp, { id: 'a01-native-host', name: pathToFileURL(path.join(here, 'a01-native-host.mjs')).href, config: {} }] }, { id: 'agent-default-model', config: selection }]); // JSON is valid YAML.
   const config = { dsh: { baseUrl: `http://127.0.0.1:${dshPort}`, ...selection }, snowluma: { wsUrl: onebot.wsUrl, httpUrl: onebot.baseUrl, followDiscoveredEndpoint: false, autoDiscover: false },
     ownerQQ: IDS.owner, admin: { qq: IDS.owner, name: '小禾' }, allow: { private: [IDS.owner, IDS.other], groups: [IDS.group_a, IDS.group_b] }, allowAllWhenEmpty: false,
     consolePort, consoleToken: controlToken, sessionCwd: path.join(trialDir, 'session-work'), persona: { file: path.join(repo, 'roles/a01-persona.md') },
