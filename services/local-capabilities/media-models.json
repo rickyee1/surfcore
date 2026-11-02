@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "asr": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
+  "kws": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+  "wake_phrase": "你好路遥",
+  "source": "official sherpa releases, prepared local assets; archive publisher digests unavailable except VAD",
+  "files": [
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/test_wavs/0.wav",
+      "bytes": 321744,
+      "sha256": "7d93384ca14702cc584a7a33fe2fed92e89e708549161cb12ea38c916882103b"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/test_wavs/3.wav",
+      "bytes": 282604,
+      "sha256": "5851e31f3e8e5f741635da9466e19fccfbabd117ebcdc92db242c92483aee064"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/test_wavs/1.wav",
+      "bytes": 163244,
+      "sha256": "8bfb42c963e623ebab31b81ff4404867d07d3102507c87ac14577c4c61663b8c"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/joiner-epoch-99-avg-1.int8.onnx",
+      "bytes": 3228485,
+      "sha256": "bdda356d6f9b8c2d7cee9ee0e26075fa537490f7fd06520be408d287073667b9"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/encoder-epoch-99-avg-1.int8.onnx",
+      "bytes": 42980793,
+      "sha256": "db6f51551762e40e549166fe041ea3e45464370b595e9ad23f06478ec3794fbb"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/decoder-epoch-99-avg-1.onnx",
+      "bytes": 13877276,
+      "sha256": "89be509a83175261695bdef5fd1c7b9ab1129a663d1284e7ba9f8507b21e0906"
+    },
+    {
+      "path": "models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/tokens.txt",
+      "bytes": 56317,
+      "sha256": "a8e0e4ec53810e433789b54a5c0134a7eaa2ffca595a6334d54c00da858841d3"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 4777666,
+      "sha256": "dd784973fc9d2fabb3b800d6dcd20fc3b0ca84f8e2415afe54b032878e447f4d"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+      "bytes": 675349,
+      "sha256": "fb581d6734511676e246e0dff2fea01b31b0913176cb3ca64576dbab0a177774"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav",
+      "bytes": 257006,
+      "sha256": "710e79fb3450042be50bb2f6432a2a549b53577aea041a577e53a926fcabb614"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/1.wav",
+      "bytes": 164976,
+      "sha256": "30edbabea84ca4c076f5b43bb44495f436f6711319c32a200d3fc5c67c1fee1d"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/0.wav",
+      "bytes": 179646,
+      "sha256": "668bf8df51a10027b84d5d8816a1ce11ae93545538dc05cfe2aa6811d399c250"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 65242,
+      "sha256": "f79760052b87239e325f0567c752ad3130b30d92effb847d4307743c20c59a24"
+    },
+    {
+      "path": "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt",
+      "bytes": 1627,
+      "sha256": "72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e"
+    },
+    {
+      "path": "models/silero_vad.onnx",
+      "bytes": 643854,
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
+    }
+  ],
+  "wake_file": {
+    "path": "media-wake.txt",
+    "bytes": 37,
+    "sha256": "480bf3077a93bd0e1c7c721ee6919072f7f540ffcdad0def07acaf53eae6e5c4"
+  }
+}

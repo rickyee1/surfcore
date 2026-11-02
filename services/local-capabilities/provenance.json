@@ -129,5 +129,156 @@
     },
     "limits": "No JS/UI changes or actual user data; no inference until explicit enabled query/rebuild, empty query uses visible recent context. Page64, worker batch32, 3500 chars per segment, token-aware subchunks, candidate4096/source depth64/node256, one active slot and timeout120s. Tool grants unchanged.",
     "license_note": "Model/asset license obligations remain those of the declared official revision; attribution here does not transfer upstream licensing."
+  },
+  "t4_media": {
+    "task": "/root/capability_service T4-P attempt1",
+    "baseline": "cc7426889725fc07684f67652af608ba842246b2",
+    "adaptation": "Twelve read-only Luyao source modules adapted into media_native with namespace, reduced old orchestrator surfaces, fixed profiles, explicit voice identity, timings and controlled playback changes. New authority/runtime/delivery and worker control authored in this task; no source runtime imports, cloud model client or database access in device workers.",
+    "source_files": [
+      {
+        "source": "session/audio_devices.py",
+        "sha256": "ece0628df95fa8614848f554d6d1e2459a86e24558fa785205347693ec7d6333",
+        "target": "media_native/audio_devices.py"
+      },
+      {
+        "source": "session/audio_endpoints.py",
+        "sha256": "10f9580a28e1507a5a1d06c8ebb61112d798c941b5221282a11873bbbbf9757f",
+        "target": "media_native/audio_endpoints.py"
+      },
+      {
+        "source": "session/audio_duplex.py",
+        "sha256": "1325bff186a504d6f55789ced3cc864d52161f1db71b62c0e6238f6e3f353f45",
+        "target": "media_native/audio_duplex.py"
+      },
+      {
+        "source": "session/audio_processing.py",
+        "sha256": "c0cf003f97f3f9b262268af2385cde8c2673efc8a361b2af9d06743d603d8d82",
+        "target": "media_native/audio_processing.py"
+      },
+      {
+        "source": "session/speech_detectors.py",
+        "sha256": "2aa8a82fb978309ca12888d1e9abb839ab3e261a42a7b69e410d7215a276442c",
+        "target": "media_native/speech_detectors.py"
+      },
+      {
+        "source": "session/reply_speech.py",
+        "sha256": "638c9642966dec22fc622f4a6eefed3146c8b89bf7c1ff487971d2005c57242d",
+        "target": "media_native/reply_speech.py"
+      },
+      {
+        "source": "session/window_targets.py",
+        "sha256": "e6b8c7ec412eaa558a8facaf5c38ae5e4e4c329fec6c8b7849c428cdde79a5ed",
+        "target": "media_native/window_targets.py"
+      },
+      {
+        "source": "session/wgc_worker.py",
+        "sha256": "236fd83edacb3533b9e6bad9448ab85878b534e8a6f48475b7470267a194bcba",
+        "target": "media_native/wgc_worker.py"
+      },
+      {
+        "source": "session/asr.py",
+        "sha256": "7a0abde6918ebcc1024513532a8d8e95308fb61883d4cf4dc2863f62e8005de4",
+        "target": "media_native/asr.py"
+      },
+      {
+        "source": "session/tts.py",
+        "sha256": "5b21bae13131202434f544b8bbd61c0918765fce26f372395b73c596fe7ab8cc",
+        "target": "media_native/tts.py"
+      },
+      {
+        "source": "session/audio_frontend.py",
+        "sha256": "3d51855d494f43c1148537292b8565209935a7ca39ae12e2f624553a27a630d7",
+        "target": "media_native/audio_frontend.py"
+      },
+      {
+        "source": "session/speech_loop.py",
+        "sha256": "1f28cd963df5156e7634fed6a6bca802bdeb6279fa9e124e3c37500117405ce4",
+        "target": "media_native/speech_loop.py"
+      }
+    ],
+    "model_manifest": "media-models.json; existing officially prepared CPU models and public wav assets, no downloads",
+    "optional_dependencies": [
+      {
+        "name": "sounddevice",
+        "version": "0.5.6",
+        "license_metadata": "MIT"
+      },
+      {
+        "name": "pywebrtc-audio",
+        "version": "0.2.0",
+        "license_metadata": "Apache-2.0"
+      },
+      {
+        "name": "sherpa-onnx",
+        "version": "1.13.8",
+        "license_metadata": "Apache licensed, as found in the LICENSE file"
+      },
+      {
+        "name": "Pillow",
+        "version": "12.3.0",
+        "license_metadata": "MIT-CMU"
+      },
+      {
+        "name": "windows-capture",
+        "version": "2.0.1",
+        "license_metadata": "MIT"
+      },
+      {
+        "name": "pywin32",
+        "version": "312",
+        "license_metadata": "PSF"
+      },
+      {
+        "name": "comtypes",
+        "version": "1.4.17",
+        "license_metadata": "MIT"
+      },
+      {
+        "name": "scipy",
+        "version": "1.18.1",
+        "license_metadata": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers."
+      },
+      {
+        "name": "pypinyin",
+        "version": "0.55.0",
+        "license_metadata": "MIT"
+      },
+      {
+        "name": "numpy",
+        "version": "2.5.2",
+        "license_metadata": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+      }
+    ],
+    "authorization": "Volatile per-role/original-pet leases only, immutable selection/context/epoch, signed expiry plus monotonic deadline, visible UI pulse <=3s, JobObject parent lifetime containment, single controlled SAPI output; no device authorization restored.",
+    "license_note": "Source project root LICENSE not present in the read-only input; authorized local adaptation retains path/hash attribution, not an assertion of redistributed third-party rights. Package license strings above are installed metadata, not complete license texts. No external publication performed.",
+    "verification_limits": "No physical microphone/speaker/capture/lockscreen or live model delivery performed. Real CPU ASR/public wav, VAD, KWS and native AEC plus generated/isolated process tests are non-device checks only.",
+    "conceptual_inputs": [
+      {
+        "path": "session/process_tree.py",
+        "sha256": "8b51e6bb813d466c257276eb464de600de877864df9ba4611ba9d66be851dbd1"
+      },
+      {
+        "path": "session/native_capture.py",
+        "sha256": "1d6b737aae7bd2700b3983018976ea8c725260437b13b6598d273bb7325069ea"
+      },
+      {
+        "path": "session/speech_worker.py",
+        "sha256": "8b13c5649e937ae2499d3e3bfb7248510b623d87abe6642cb9d7537bbe93b06d"
+      },
+      {
+        "path": "schemas/hands_free.py",
+        "sha256": "8643ac7cfb1b3e5c613ea918300fd5136dae87004f92900a94f8405f920d4d8c"
+      }
+    ],
+    "repair_attempt2": {
+      "task": "/root/capability_service T4-P attempt2",
+      "findings": [
+        "F1 source/delivery invalidation follows independent output and handsfree synthesis/render queues; sent receipt is not playback completion",
+        "F2 original wall/monotonic/visibility deadlines rechecked after COMMIT, native identity/model setup and before device open/capture/render; no expiry clamp"
+      ],
+      "authorship": "Local worker-authored narrow changes in existing T4 Python adapters/authority/delivery and isolated tests; original Luyao source hashes unchanged; core/storage/portable/schema not edited in this repair",
+      "evidence": ".local/evidence/t4-media/attempt2",
+      "physical_devices": "NOT_VERIFIED; no capture/playback performed"
+    }
   }
 }

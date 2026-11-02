@@ -58,6 +58,8 @@ class CapabilityService:
             self.tools = ToolBroker(self)
             from semantic_index import SemanticIndex
             self.semantic = SemanticIndex(self)
+            from media_authority import MediaAuthority
+            self.media = MediaAuthority(self)
             # A manually restored older main file must still obey the independent ledger.
             self.db.execute('BEGIN IMMEDIATE')
             victims = self.db.execute('SELECT DISTINCT f.character,f.memory FROM fingerprints f JOIN sovereignty.tombstones t ON t.character=f.character AND t.kind=f.kind AND t.digest=f.digest JOIN memories m ON m.id=f.memory WHERE m.status!=?', ('deleted',)).fetchall()
@@ -75,23 +77,29 @@ class CapabilityService:
 
     def close(self):
         try:
-            if self.store.conn is not None and hasattr(self, 'semantic'):
-                self.semantic.close()
+            if hasattr(self,'media'):
+                self.media.close()
         finally:
             try:
-                if self.store.conn is not None and hasattr(self, 'tools'):
-                    self.tools.close()
+                if self.store.conn is not None and hasattr(self, 'semantic'):
+                    self.semantic.close()
             finally:
-                self.store.close()
+                try:
+                    if self.store.conn is not None and hasattr(self, 'tools'):
+                        self.tools.close()
+                finally:
+                    self.store.close()
 
     def poll(self):
         """Broker latches persistence faults before either request/idle polling returns."""
         try:
             self.tools.poll()
             self.semantic.poll()
+            self.media.poll()
         except BaseException:
             self.tools.latch_fault()
             self.semantic.fail_closed()
+            self.media.fail_closed()
             raise
 
     def handle(self, request):
@@ -120,7 +128,9 @@ class CapabilityService:
                 self.db.execute("COMMIT")
                 for callback in self.after_commit:
                     callback()
-            except BaseException:
+            except BaseException as failure:
+                if not isinstance(failure,ServiceError):
+                    self.media.fail_closed()
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
                 raise
@@ -161,7 +171,7 @@ class CapabilityService:
 
     def dispatch(self, op, request, params):
         if op in ("health", "capabilities"):
-            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup", "tools", "semantic_index"], storage="SQLCipher")
+            return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup", "tools", "semantic_index", "media"], storage="SQLCipher")
         if op == "character.activate":
             character = text(params.get("character_id"), 200)
             self.db.execute("INSERT OR IGNORE INTO characters(id) VALUES(?)", (character,))
@@ -178,8 +188,13 @@ class CapabilityService:
             self.active.pop(character)
             return dict(retired=True)
         session = self.authorize(request)
+        if op.startswith('media.'):
+            return self.media.dispatch(op,session,params)
         if op.startswith('tool.'):
-            return self.tools.dispatch(op, session, params)
+            result = self.tools.dispatch(op, session, params)
+            if op in ('tool.emergency.stop','tool.emergency.reset'):
+                self.media.retire(code='TOOL_STOPPED')
+            return result
         paused = self.db.execute('SELECT paused FROM recovery_state WHERE character=?', (session['character'],)).fetchone()
         if paused and paused[0] and (op.startswith('context.') or op in ('attention.check','attention.reserve') or (op.startswith('memory.') and not session['management'])):
             raise ServiceError('RECOVERY_REVIEW_REQUIRED', '恢复内容尚未完成主人复审。', '在管理页核对最新删除记录并明确复审；暂停生成与发送。')
@@ -204,6 +219,7 @@ class CapabilityService:
     def invalidate(self, character):
         self.tools.retire(character)
         self.semantic.retire(character,'cancelled','LIFECYCLE_RETIRED')
+        self.media.retire(character)
         self.bindings = {key: value for key, value in self.bindings.items() if value["character"] != character}
         recover_reservations(self.db, character)
 
