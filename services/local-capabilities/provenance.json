@@ -280,5 +280,28 @@
       "evidence": ".local/evidence/t4-media/attempt2",
       "physical_devices": "NOT_VERIFIED; no capture/playback performed"
     }
+  },
+  "p1_received_metadata": {
+    "task": "P1 attempt1 /root/capability_service",
+    "date": "2026-11-03",
+    "baseline": "9f456d24b3165773b805879a5d59912a1e6af1e2",
+    "design_sha256": "f7abfcf0447306cf388fcc6286e9bfe176ddf8d51c18a7a39b2087a9a47ee6a3",
+    "authorship": "Purpose-built optional source metadata module, narrow storage/core/backup seams, isolated actual-SQLCipher regressions and API/case. No additional Luyao code copied; original attribution and source hashes remain unchanged.",
+    "authority": "Trusted stdio token bound to original ordinary binding and character generation; new original ingress only. Service received time is not event time. Old/derived/migration sources stay unknown; group speaker unknown. Current revision and actual text hash, event/scope/principal bind metadata; independent latest deletion ledger remains authoritative.",
+    "compatibility": "Optional record_metadata table; reader/schema/DPAPI unchanged. v1 encrypted optional sidecar has one row per valid nondeleted memory and is covered by MAX_BYTES and whole snapshot hash. Six logical header counts unchanged. Old snapshot missing sidecar stays unknown; actual old reader rejects new sidecar. No runtime credential/token export.",
+    "tests": "Dedicated21 metadata checks; original service23/backend31; portable Python12/Node22. All temporary synthetic stores, read-only historical git reader objects; no production/API/model/QQ/device operations.",
+    "limits": [
+      "No JS ingress/purpose integration or deployment",
+      "No T1/semantic failed-repair dependency or attempt reset",
+      "No second personality/scheduler/attention policy",
+      "No legacy time/speaker inference from rowid, actor, tags or old logs"
+    ],
+    "repair_attempt2": {
+      "finding": "Incomplete original source identity/frame validation in attempt1: original content_hash and episode/non-derived identity were not validity gates; revise could advance invalid metadata.",
+      "implementation": "Worker-authored unified validate_row gates and shared validated helper for projection/export/revise; backup already uses the same validator. An invalid frame is cleared in the owning correct/suspend transaction, not merely skipped: actual historical revision/body ABA otherwise re-matches old metadata. COMMIT denial rolls back frame retirement together with the correction.",
+      "evidence": ".local/evidence/purpose-parity/p1-attempt2",
+      "tests": "Two actual 9f historical Store counterexamples plus revision/body ABA red before repair; identity matrix additionally separates kind-only/derived-only/combined; export/import/correction/backup-restore and invalid-frame retirement COMMIT rollback covered. Actual metadata24/service23/backend31/portable Python12/Node22 all PASS (112). Frozen checks.json records commands, return codes and logs.",
+      "tool_trace": "Native editor call IDs and exportable host invocation events are unknown to this worker interface; exact apply_patch inputs, before/after snapshots and complete applicable diffs are preserved. No model/backend identity claim."
+    }
   }
 }

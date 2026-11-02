@@ -18,6 +18,8 @@ One newline-delimited UTF-8 JSON request per stdin line, one response per stdout
 | memory.ingest / memory.propose | source_event_id, text, source_refs, derived_from, expected_memory_epoch; optional source_revisions must exactly bind unique derived_from IDs to current visible revisions in the same transaction; bounded automatic add, with auto_write consent and idempotency |
 | memory.detail | Management only: id; record, sources and revisions |
 | memory.correct | Management only: id, statement, expected_revision; pin user correction, invalidate derived descendants |
+| memory.ingress.open | Private trusted stdio host only, ordinary binding: returns an opaque binding/generation-specific ingress_token; never expose through browser/model allowlists |
+| memory.materials | Ordinary binding only, limit1..50; audience-first recursive active projection with optional proved received-time/source metadata; management is refused; see P1_METADATA_API.md |
 | memory.suspend / memory.delete | Management only: id, expected_revision; stop usage or purge managed provenance closure |
 | memory.export | Management only: explicit plaintext export of managed records |
 | memory.settings | Management only: get or set auto_write |

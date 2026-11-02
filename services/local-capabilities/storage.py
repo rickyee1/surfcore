@@ -158,6 +158,11 @@ CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, character TEXT NOT NULL
  event_hash TEXT NOT NULL, content_hash TEXT NOT NULL, sources TEXT NOT NULL, derived TEXT NOT NULL, kind TEXT NOT NULL,
  UNIQUE(character,scope,event_hash));
 CREATE INDEX IF NOT EXISTS memory_audience ON memories(character,scope,status);
+CREATE TABLE IF NOT EXISTS record_metadata(memory TEXT PRIMARY KEY,character TEXT NOT NULL,scope TEXT NOT NULL,
+ bound_principal TEXT NOT NULL,received_at_ms INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ event_hash TEXT NOT NULL,content_hash TEXT NOT NULL,source_kind TEXT NOT NULL,platform TEXT NOT NULL,
+ account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,owner_at_receive INTEGER NOT NULL,
+ record_revision INTEGER NOT NULL,record_content_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS revisions(memory TEXT NOT NULL, revision INTEGER NOT NULL, statement TEXT NOT NULL, actor TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fingerprints(memory TEXT NOT NULL, character TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL,
  UNIQUE(memory,kind,digest));

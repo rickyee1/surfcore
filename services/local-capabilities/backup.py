@@ -8,6 +8,7 @@ import stat
 import uuid
 from core import encode, integer, text
 from storage import ServiceError, recover_reservations
+from record_metadata import COLUMNS as METADATA_COLUMNS, validate_row as validate_metadata_row
 
 COLUMNS = {
     'memories': ('id','character','scope','principal','statement','revision','status','pinned','event_hash','content_hash','sources','derived','kind'),
@@ -105,15 +106,18 @@ class BackupManager:
                 raise ValueError('integrity')
             meta = dict(connection.execute('SELECT key,value FROM snapshot_meta').fetchall())
             encoded = dict(connection.execute('SELECT name,payload FROM snapshot_rows').fetchall())
-            if set(meta) != {'header','character'} or set(encoded) != set(COLUMNS) | {'deletion_ledger'}:
+            required = set(COLUMNS) | {'deletion_ledger'}
+            if set(meta) != {'header','character'} or set(encoded) not in (required, required | {'record_metadata'}):
                 raise ValueError('fields')
             if sum(len(value.encode('utf-8')) for value in encoded.values()) > MAX_BYTES:
                 raise ValueError('size')
             header = json.loads(meta['header'])
             data = dict(character_id=meta['character'], records={name: json.loads(encoded[name]) for name in COLUMNS},
                         deletion_ledger=json.loads(encoded['deletion_ledger']))
+            if 'record_metadata' in encoded:
+                data['records']['record_metadata'] = json.loads(encoded['record_metadata'])
             self.validate(data)
-            if header.get('counts') != {name:len(rows) for name,rows in data['records'].items()}:
+            if header.get('counts') != {name:len(data['records'][name]) for name in COLUMNS}:
                 raise ValueError('counts')
             return header, data
         except Exception:
@@ -125,6 +129,8 @@ class BackupManager:
     def validate(data):
         character = text(data['character_id'], 200)
         records = data['records']
+        if not isinstance(records, dict) or set(records) not in (set(COLUMNS), set(COLUMNS) | {'record_metadata'}):
+            raise ValueError('record sets')
         if not isinstance(data['deletion_ledger'],list) or len(encode(data).encode('utf-8')) > MAX_BYTES:
             raise ValueError('payload')
         total = 0
@@ -209,6 +215,19 @@ class BackupManager:
             if row['episode'] not in memories:
                 raise ValueError('consumption')
             integer(row['revision'],1,2**53-1); text(row['scope'],650); text(row['proposal'],200)
+        metadata = records.get('record_metadata', [])
+        if (not isinstance(metadata, list) or len(metadata) > sum(row['status'] != 'deleted' for row in memories.values())
+                or any(not isinstance(row, dict) for row in metadata)):
+            raise ValueError('metadata bound')
+        identifiers = [row.get('memory') for row in metadata]
+        if any(not isinstance(identifier, str) for identifier in identifiers) or len(set(identifiers)) != len(identifiers):
+            raise ValueError('metadata duplicate')
+        for row in metadata:
+            if row['memory'] not in memories:
+                raise ValueError('metadata orphan')
+            validate_metadata_row(row, memories[row['memory']], records['revisions'])
+            if ('content', row['content_hash']) not in fingerprints.get(row['memory'], set()):
+                raise ValueError('metadata source fingerprint')
 
     def collect(self, character):
         records = {}
@@ -218,6 +237,9 @@ class BackupManager:
             else:
                 query = f'SELECT * FROM {name} WHERE character=?'
             records[name] = [dict(row) for row in self.db.execute(query, (character,))]
+        # Optional v1 encrypted sidecar; not a seventh logical count. Older
+        # readers reject its unknown row-set rather than silently dropping it.
+        records['record_metadata'] = self.service.metadata.export_rows(character)
         return dict(character_id=character, records=records,
                     deletion_ledger=[dict(row) for row in self.db.execute('SELECT * FROM sovereignty.tombstones WHERE character=?', (character,))])
 
@@ -299,7 +321,7 @@ class BackupManager:
             self.validate(data)
             header = dict(format_version=1, backup_id=identifier, salt=salt, kdf=KDF,
                           lineage=self.db.execute("SELECT value FROM sovereignty.metadata WHERE key='lineage'").fetchone()[0],
-                          created_at=self.service.clock(), counts={name:len(rows) for name,rows in data['records'].items()},
+                          created_at=self.service.clock(), counts={name:len(data['records'][name]) for name in COLUMNS},
                           source_requires_review=self.paused(character))
             file = self.owned('backups', identifier, '.db')
             self.write(file, key, header, data)
@@ -387,6 +409,7 @@ class BackupManager:
         self.db.execute('INSERT OR IGNORE INTO sovereignty.tombstones SELECT * FROM tombstones WHERE character=?',(character,))
         self.db.executemany('INSERT OR IGNORE INTO sovereignty.tombstones VALUES(?,?,?)',
                             [(value['character'],value['kind'],value['digest']) for value in data['deletion_ledger']])
+        self.db.execute('DELETE FROM record_metadata WHERE character=?', (character,))
         for table in ('record_source_revisions','revisions','memory_terms'):
             self.db.execute(f'DELETE FROM {table} WHERE memory IN (SELECT id FROM memories WHERE character=?)',(character,))
         for table in ('fingerprints','episode_consumption','memory_proposals','memories'):
@@ -397,6 +420,11 @@ class BackupManager:
                 if table == 'memories' and self.db.execute('SELECT 1 FROM memories WHERE id=?',(value['id'],)).fetchone():
                     raise ServiceError('VERSION_CONFLICT','快照记录 ID 与其他角色冲突。')
                 self.db.execute(f'INSERT OR IGNORE INTO {table} ({",".join(columns)}) VALUES({placeholders})',[value[name] for name in columns])
+        for value in data['records'].get('record_metadata', []):
+            if self.db.execute('SELECT 1 FROM record_metadata WHERE memory=?', (value['memory'],)).fetchone():
+                raise ServiceError('VERSION_CONFLICT', '快照来源元数据 ID 与其他角色冲突。')
+            self.db.execute('INSERT INTO record_metadata (' + ','.join(METADATA_COLUMNS) + ') VALUES(' + ','.join('?' for _ in METADATA_COLUMNS) + ')',
+                            [value[name] for name in METADATA_COLUMNS])
         self.db.execute('INSERT OR IGNORE INTO tombstones SELECT * FROM sovereignty.tombstones WHERE character=?',(character,))
         victims = self.db.execute('SELECT DISTINCT f.memory FROM fingerprints f JOIN tombstones t ON t.character=f.character AND t.kind=f.kind AND t.digest=f.digest WHERE f.character=?',(character,)).fetchall()
         for victim in victims:
@@ -418,6 +446,7 @@ class BackupManager:
         recover_reservations(self.db,character)
         self.service.tools.retire(character)
         def after_commit():
+            self.service.metadata.retire(character)
             self.service.bindings = {key:value for key,value in self.service.bindings.items() if value['character'] != character}
             self.service.active.pop(character,None)
         self.service.after_commit.append(after_commit)

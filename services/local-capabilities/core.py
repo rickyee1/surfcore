@@ -52,6 +52,8 @@ class CapabilityService:
         try:
             from memory_governance import MemoryGovernance
             self.governance = MemoryGovernance(self)
+            from record_metadata import RecordMetadata
+            self.metadata = RecordMetadata(self)
             from backup import BackupManager
             self.backups = BackupManager(self)
             from tool_broker import ToolBroker
@@ -226,6 +228,7 @@ class CapabilityService:
         raise ServiceError("INVALID_REQUEST", "未知操作。")
 
     def invalidate(self, character):
+        self.metadata.retire(character)
         self.tools.retire(character)
         self.semantic.retire(character,'cancelled','LIFECYCLE_RETIRED')
         self.media.retire(character)
@@ -317,6 +320,10 @@ class CapabilityService:
 
     def memory(self, op, session, params):
         character = session["character"]
+        if op == 'ingress.open':
+            return self.metadata.open(session, params)
+        if op == 'materials':
+            return self.metadata.materials(session, params)
         if op == "query":
             limit = integer(params.get("limit", 20), 1, 100)
             query = params.get("query", "")
@@ -332,6 +339,8 @@ class CapabilityService:
                        and ((row['id'] in candidates) if candidates is not None else query.casefold() in row["statement"].casefold())]
             return dict(memories=records[:limit], memory_epoch=self.epoch(character), character_epoch=session["epoch"])
         if op in ("ingest", "propose"):
+            if op == 'propose' and 'ingress' in params:
+                raise ServiceError('PERMISSION_DENIED', '自动提案不能声明原始入站来源。')
             if params.get("expected_memory_epoch") != self.epoch(character):
                 raise ServiceError("STALE_CONTEXT", "自动写入的记忆版本已过期。", "丢弃旧提案并重新检索。")
             if op == "propose" and (params.get("id") or params.get("target_id") or params.get("operation", "add") != "add"):
@@ -355,7 +364,8 @@ class CapabilityService:
         if op == "export":
             rows = self.visible_rows(session)
             revisions = [dict(row) for row in self.db.execute("SELECT r.* FROM revisions r JOIN memories m ON r.memory=m.id WHERE m.character=?", (character,))]
-            return dict(memories=[self.record(row) for row in rows], episodes=[self.record(row) for row in rows if row["kind"] in ("episode", "legacy_summary")], revisions=revisions, memory_epoch=self.epoch(character))
+            return dict(memories=[self.record(row) for row in rows], episodes=[self.record(row) for row in rows if row["kind"] in ("episode", "legacy_summary")], revisions=revisions,
+                        record_metadata=self.metadata.export_rows(character), memory_epoch=self.epoch(character))
         row = self.target(character, params)
         if op == "detail":
             return dict(memory=self.record(row), revisions=[dict(item) for item in self.db.execute("SELECT * FROM revisions WHERE memory=? ORDER BY revision", (row["id"],))], sources=json.loads(row["sources"]))
@@ -372,10 +382,12 @@ class CapabilityService:
             for identifier in self.affected_records(character, row["id"]) - {row["id"]}:
                 self.db.execute("UPDATE memories SET status='suspended',revision=revision+1 WHERE id=? AND character=? AND status='active'", (identifier, character))
             self.db.execute("UPDATE memories SET statement=?,revision=revision+1,pinned=1 WHERE id=?", (statement, row["id"]))
+            self.metadata.revise(row, statement, row['revision'] + 1)
             self.fingerprint(row["id"], character, "content", digest(statement))
             self.db.execute("INSERT INTO revisions VALUES(?,?,?,?)", (row["id"], row["revision"] + 1, statement, "user"))
         elif op == "suspend":
             self.db.execute("UPDATE memories SET status='suspended',revision=revision+1 WHERE id=?", (row["id"],))
+            self.metadata.revise(row, row['statement'], row['revision'] + 1)
         elif op == "delete":
             self.delete_tree(character, row["id"])
         else:
@@ -399,6 +411,7 @@ class CapabilityService:
                 raise ServiceError('INVALID_REQUEST','来源修订必须恰好对应全部唯一派生来源。')
             for revision in proofs.values():
                 integer(revision,1,2**53-1)
+        ingress = self.metadata.proof(session, params, migration)
         fingerprints = [("event", digest(event)), ("content", digest(statement))] + [("source", digest(ref)) for ref in refs]
         for kind, hashed in fingerprints:
             if self.db.execute("SELECT 1 FROM tombstones WHERE character=? AND kind=? AND digest=?", (character, kind, hashed)).fetchone():
@@ -434,6 +447,7 @@ class CapabilityService:
         identifier = uuid.uuid4().hex
         self.db.execute("INSERT INTO memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (identifier, character, session["scope"], session["principal"], statement, 1, status, 0, digest(event), digest(statement), encode(refs), encode(derived), "legacy_summary" if migration else "episode"))
         self.db.execute("INSERT INTO revisions VALUES(?,?,?,?)", (identifier, 1, statement, "migration" if migration else "ingest"))
+        self.metadata.capture(session, identifier, statement, event, ingress)
         for kind, hashed in fingerprints:
             self.fingerprint(identifier, character, kind, hashed)
         if proofs is not None:
@@ -476,6 +490,7 @@ class CapabilityService:
             self.db.execute("INSERT OR IGNORE INTO tombstones SELECT character,kind,digest FROM fingerprints WHERE memory=? AND character=?", (item, character))
             self.db.execute("INSERT OR IGNORE INTO sovereignty.tombstones SELECT character,kind,digest FROM fingerprints WHERE memory=? AND character=?", (item, character))
             self.db.execute("DELETE FROM revisions WHERE memory=?", (item,))
+            self.db.execute('DELETE FROM record_metadata WHERE memory=? AND character=?', (item, character))
             self.db.execute("UPDATE memories SET statement='',sources='[]',derived='[]',status='deleted',revision=revision+1 WHERE id=? AND character=? AND status!='deleted'", (item, character))
         self.governance.on_delete(character, doomed)
 
