@@ -168,8 +168,28 @@ await test('pyvenv 缺失：失败且不切换旧包', async () => {
   const before = await fs.readFile(path.join(target, 'config.toml'), 'utf8');
   const src = await makePack('voice-local');
   await fs.rm(path.join(src, '.venv', 'pyvenv.cfg'));
-  await vp.startImport('voice-local', { sourceDir: src });
-  const im = await waitImport('voice-local');
+  // Hold the real final backup rename, exactly where the old early terminal
+  // state allowed a caller to start another import or observe a missing config.
+  const rename = fs.rename;
+  let release, entered, restored;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const restoration = new Promise(resolve => { restored = resolve; });
+  fs.rename = async (from, to) => {
+    if (String(from).startsWith(target + '.backup-') && String(to) === target) {
+      entered(); await gate;
+      try { return await rename(from, to); } finally { restored(); }
+    }
+    return rename(from, to);
+  };
+  let during, im, timeout;
+  try {
+    await vp.startImport('voice-local', { sourceDir: src });
+    await Promise.race([blocked, new Promise((_, reject) => { timeout = setTimeout(() => reject(Error('rollback barrier not reached')), 10000); })]);
+    during = (await vp.list()).packs.find(p => p.id === 'voice-local').import;
+    release(); await restoration; im = await waitImport('voice-local');
+  } finally { clearTimeout(timeout); release(); fs.rename = rename; }
+  assert.notEqual(during.phase, '失败', '失败终态不得先于旧包回滚完成');
   assert.equal(im.phase, '失败');
   assert.equal(im.code, 'IMPORT_ENV_MISSING');
   assert.equal(await fs.readFile(path.join(target, 'config.toml'), 'utf8'), before);

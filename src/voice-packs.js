@@ -512,7 +512,9 @@ export function createVoicePacks(cfg) {
         rec.code = err.code;
         rec.hint = err.hint;
         rec.missing = err.missing;
-        rec.phase = '失败';
+        // Keep the import non-terminal until cleanup/rollback has settled.
+        // Readers and startImport use this phase as the lifecycle boundary.
+        rec.phase = '处理失败，正在恢复旧包';
         rec.progress = Math.min(rec.progress, 99);
 
         if (temp) {
@@ -544,6 +546,7 @@ export function createVoicePacks(cfg) {
             rec.hint = `旧包备份在：${rec.backupDir}。请手动恢复，不要删除。原因：${String(rollback?.message || rollback)}`;
           }
         }
+        rec.phase = '失败';
       }
     })();
 
