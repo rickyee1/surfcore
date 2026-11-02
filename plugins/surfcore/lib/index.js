@@ -17,8 +17,9 @@
  */
 import { LOCAL_ROOT } from '../../../src/local-capabilities-state.js';
 import { createChannelHandler } from './local-capabilities/channel.js';
-import { localCapabilities, disposeLocalCapabilities } from './local-capabilities/host.js';
+import { localCapabilities, configureSemanticWriter, disposeLocalCapabilities } from './local-capabilities/host.js';
 import { createManagementHandler } from './local-capabilities/management.js';
+import { createWriterHandler } from './local-capabilities/semantic-writer.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -711,9 +712,14 @@ export function apply(ctx) {
   }
 
   const local = localCapabilities();
+  const semanticWriter = configureSemanticWriter({ ctx, tokenBudget });
+  const writerHandler = createWriterHandler(semanticWriter);
+  route('exact', `${API_PREFIX}/local-capabilities/writer/status`, writerHandler);
+  route('exact', `${API_PREFIX}/local-capabilities/writer/run`, writerHandler);
   const localChannel = createChannelHandler({ capabilities: local, keyFile: path.join(LOCAL_ROOT, 'channel.key') });
   const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
   route('exact', '/dsh-surfcore/local-capabilities', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/tools', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/api', localManagement);
   // T2a mount only: management owns backup method/session/Origin validation.
   route('exact', '/dsh-surfcore/local-capabilities/backup/import', localManagement);

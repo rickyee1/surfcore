@@ -140,11 +140,12 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
     if (!config.enabled) throw fail('COMPANION_DISABLED', '自主陪伴尚未启用。', '先预览公开材料，再在本机设置中明确启用。');
     const controller = new AbortController();
     const snapshot = { id: crypto.randomUUID(), character: character(), files: f, revision: record.revision, purposeRevision: JSON.stringify(purposeConfig() || {}), controller };
-    pending = snapshot; let release; let state; let selected = null; let intentId = ''; let attemptedDispatch = false;
+    pending = snapshot; let release; let state; let selected = null; let intentId = ''; let attemptedDispatch = false; let writerLease;
     try {
       release = acquire(f.lock);
       state = stateRecord(f); const p = policy(config); state.purpose = normalizePurposeState(state.purpose, now());
       const readyOwner = await ready(snapshot);
+      writerLease = await capabilities.beginTurn(readyOwner.channel);
       if (automatic && state.nextBrowseAt > now()) return { ok: true, skipped: true, reason: 'interval', nextBrowseAt: state.nextBrowseAt };
       const decision = evaluatePurposeTick({ now: now(), config: p, state: state.purpose, env: { enabled: true, modeOk: true, dshReady: true, ownerAllowed: true, ownerIdleMs: readyOwner.ownerIdleMs } });
       if (decision.action !== 'run') throw fail('COMPANION_PURPOSE_BLOCKED', `目的排程暂不出发：${decision.reason}`, '等待冷却、安静时段或主人当前对话结束；不会绕过统一注意力设置。');
@@ -164,7 +165,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
       let materialRecord = await sourceRecord(publicContext, eventId);
       let ingested = { stored: true, memory_epoch: publicContext.memory_epoch };
       if (materialRecord.status === 'missing') {
-        ingested = await capabilities.ingest(publicContext, eventId, freshMaterial); assertActive(snapshot);
+        ingested = await capabilities.ingest(publicContext, eventId, freshMaterial, { actor: 'external' }); assertActive(snapshot);
         publicContext = await capabilities.context(publicChannel);
         if (publicContext.memory_epoch !== ingested.memory_epoch) throw fail('STALE_CONTEXT', '资料入库期间出现其他记忆变更，本轮已取消。');
         materialRecord = await sourceRecord(publicContext, eventId);
@@ -186,7 +187,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
       if (!ephemeral) {
         const thoughtEvent = `bili:public:${source.bvid}:thought:${materialRecord.id}:${materialRecord.revision}`;
         await sourceRecord(publicContext, thoughtEvent);
-        thoughtWrite = await capabilities.ingest(publicContext, thoughtEvent, thought, { derivedFrom: [{ id: materialRecord.id, revision: materialRecord.revision }] }); assertActive(snapshot);
+        thoughtWrite = await capabilities.ingest(publicContext, thoughtEvent, thought, { derivedFrom: [{ id: materialRecord.id, revision: materialRecord.revision }], actor: 'assistant' }); assertActive(snapshot);
         publicContext = await capabilities.context(publicChannel);
         if (publicContext.memory_epoch !== thoughtWrite.memory_epoch) throw fail('STALE_CONTEXT', '想法入库期间出现其他记忆变更，本轮已取消。');
         if (thoughtWrite.duplicate) {
@@ -231,7 +232,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
         write(f.state, state);
       }
       throw e instanceof CapabilityError ? e : fail('COMPANION_UNAVAILABLE', '自主轮次失败，本轮不会自动补发。');
-    } finally { controller.abort(); if (pending === snapshot) pending = null; release?.(); }
+    } finally { capabilities.endTurn(writerLease); controller.abort(); if (pending === snapshot) pending = null; release?.(); }
   }
   async function tick() { try { if (!configRecord().config.enabled || capabilities.mode !== 'local') return; return await run({ automatic: true }); } catch (e) { const error = errorResult(e); if (lastError?.code !== error.code) log(`[companion] ${error.code}`); lastError = error; return error; } }
   function start() { if (!timer && !disposed) { timer = setInterval(() => { void tick(); }, 60000); timer.unref?.(); } }

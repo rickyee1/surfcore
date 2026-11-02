@@ -189,10 +189,12 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     return acc;
   }, { out: [], droppingImport: false }).out.join('\n');
   source = source.replaceAll('import.meta.url', JSON.stringify(pathToFileURL(path.join(temp, 'src/bridge.js')).href));
+  // An opt-in finite event stream runs the real turn-end/send finally path once.
+  source = source.replace('      if (framesThisStream > 0) {', '      if (globalThis.__auditMuxOnce) return;\n      if (framesThisStream > 0) {');
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
-    localChannels, ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
+    localChannels, pumpMux, ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     fishChatWindows, evaluateConversationFishGuard, fishGuardSendBlock, recordFishWindow,

@@ -49,23 +49,30 @@ export function createChannelHandler({ capabilities, keyFile }) {
         if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
         contexts.set(handle, { context: intent.ownerContext, channel: JSON.stringify(trusted), expires: intent.expires, intent });
         result = { context: handle, text: intent.text, outreachId: intent.outreachId, expiresAt: intent.expires };
-      } else if (data.action === 'context') {
-        const context = await capabilities.context(trusted, String(data.query || '').slice(0, 2000));
+      } else if (data.action === 'context' || data.action === 'turn.begin') {
+        const writerTurn = data.action === 'turn.begin' ? { lease: await capabilities.beginTurn?.(trusted) } : null;
+        let context;
+        try { context = await capabilities.context(trusted, String(data.query || '').slice(0, 2000)); }
+        catch (error) { capabilities.endTurn?.(writerTurn?.lease); throw error; }
         const handle = crypto.randomBytes(24).toString('hex');
         if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
-        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000 });
+        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn });
         result = { context: handle, text: context.text, memory_epoch: context.memory_epoch, character_epoch: context.binding.character_epoch };
       } else {
         const stored = contexts.get(data.context);
-        if (!stored || stored.channel !== JSON.stringify(trusted) || (stored.expires < Date.now() && !['attention.finalize', 'intent.finish'].includes(data.action))) throw new CapabilityError('BINDING_INVALID', '渠道上下文已失效。', '重新建立本会话上下文。');
+        if (!stored || stored.channel !== JSON.stringify(trusted) || (stored.expires < Date.now() && !['attention.finalize', 'intent.finish', 'turn.end'].includes(data.action))) throw new CapabilityError('BINDING_INVALID', '渠道上下文已失效。', '重新建立本会话上下文。');
         // Finalization releases no content; retain the original binding even after stop/correction.
         // Python still verifies reservation ownership and character epoch.
-        if (!['attention.finalize', 'intent.finish'].includes(data.action)) {
+        if (!['attention.finalize', 'intent.finish', 'turn.end'].includes(data.action)) {
           if (stored.intent) { await validateIntent(stored.intent); checkedIntent = stored.intent; }
           await capabilities.validate(stored.context);
         }
         if (stored.intent && (!['validate', 'attention.check', 'attention.reserve', 'attention.finalize', 'intent.finish'].includes(data.action) || (data.action.startsWith('attention.') && data.params?.outreach_id !== stored.intent.outreachId))) throw new CapabilityError('PERMISSION_DENIED', '主动凭据仅可核查及结算原有投递，不能更改材料或事件。');
-        if (data.action === 'intent.finish') {
+        if (data.action === 'turn.end') {
+          capabilities.endTurn?.(stored.writerTurn?.lease);
+          if (stored.writerTurn) stored.writerTurn.lease = null;
+          result = { released: true };
+        } else if (data.action === 'intent.finish') {
           if (!stored.intent || !['failed', 'unknown'].includes(data.params?.outcome)) throw new CapabilityError('PERMISSION_DENIED', '主动结果结算无效。');
           if (stored.intent.status === 'claimed') stored.intent.status = data.params.outcome;
           result = { status: stored.intent.status };
@@ -77,12 +84,12 @@ export function createChannelHandler({ capabilities, keyFile }) {
           if (projection.memory_epoch !== stored.context.memory_epoch) throw new CapabilityError('STALE_CONTEXT', '来源查询期间记忆已变更。', '重新读取本轮上下文。');
           const handle = crypto.randomBytes(24).toString('hex');
           if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
-          contexts.set(handle, { context: { ...stored.context, memory_epoch: projection.memory_epoch }, channel: stored.channel, expires: Date.now() + 30 * 60000 });
+          contexts.set(handle, { context: { ...stored.context, memory_epoch: projection.memory_epoch }, channel: stored.channel, expires: Date.now() + 30 * 60000, writerTurn: stored.writerTurn });
           result = { ...projection, context: handle };
         }
         else if (data.action === 'validate') result = { valid: true };
         else if (data.action === 'ingest') {
-          result = await capabilities.ingest(stored.context, String(data.eventId || ''), String(data.text || ''));
+          result = await capabilities.ingest(stored.context, String(data.eventId || ''), String(data.text || ''), { actor: trusted.kind.startsWith('qq-') ? 'user' : 'external' });
           stored.context.memory_epoch = result.memory_epoch;
         } else if (['attention.check','attention.reserve','attention.finalize','attention.respond'].includes(data.action)) {
           if (stored.intent && !['attention.check', 'attention.reserve', 'attention.finalize'].includes(data.action)) throw new CapabilityError('PERMISSION_DENIED', '主动凭据不能代替主人回复。');

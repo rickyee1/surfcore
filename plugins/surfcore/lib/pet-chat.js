@@ -810,9 +810,9 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
     inFlight += 1;
     const startedAt = Date.now();
-    let localContext;
-    try { if (local.guarded) { localContext = await local.context(petChannel, say); await local.call(petChannel, 'attention.respond'); } }
-    catch (e) { inFlight -= 1; const failure = errorResult(e); lastError = failure.error; return failure; }
+    let localContext; let writerLease;
+    try { if (local.guarded) { writerLease = await local.beginTurn(petChannel); localContext = await local.context(petChannel, say); await local.call(petChannel, 'attention.respond'); } }
+    catch (e) { local.endTurn(writerLease); inFlight -= 1; const failure = errorResult(e); lastError = failure.error; return failure; }
     const history = readHistory();
     const role = roleInfo();
     const owner = ownerInfo();
@@ -858,7 +858,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       let localRemembered = false;
       if (localContext) {
         await local.validate(localContext);
-        const saved = await local.ingest(localContext, `pet:${crypto.randomUUID()}`, say);
+        const saved = await local.ingest(localContext, `pet:${crypto.randomUUID()}`, say, { actor: 'user' });
         // Use only this transaction's epoch; never refresh over a concurrent correction.
         await local.validate({ ...localContext, memory_epoch: saved.memory_epoch });
         localRemembered = !saved.skipped;
@@ -889,6 +889,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       lastError = failure.error;
       return failure;
     } finally {
+      local.endTurn(writerLease);
       inFlight = Math.max(0, inFlight - 1);
     }
   }

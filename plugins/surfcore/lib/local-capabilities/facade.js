@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { CapabilityError } from './supervisor.js';
+import { TOOLS_UI_OPS } from './tools-client.js';
 
 export class LocalCapabilities {
   constructor({ supervisor, stateFile, currentCharacter }) {
@@ -20,6 +22,7 @@ export class LocalCapabilities {
   async setMode(mode) {
     if (!['legacy', 'shadow', 'local', 'paused'].includes(mode)) throw new CapabilityError('INVALID_REQUEST', '未知后端状态。');
     if (this.state.written && ['legacy', 'shadow'].includes(mode)) throw new CapabilityError('PERMISSION_DENIED', '本地库已有正式写入，只能暂停。', '请先导出并核对本地数据。');
+    this.semanticWriter?.cancel();
     // Retire before changing the pointer; failed retire leaves the old guarded state.
     if (this.active && this.supervisor.child && this.active.generation === this.supervisor.generation) await this.supervisor.raw('lifecycle.retire', this.active);
     this.active = null; this.bindings.clear(); this.state.mode = mode; this.persist();
@@ -32,6 +35,7 @@ export class LocalCapabilities {
     const work = this.serial.then(async () => {
       const c = this.currentCharacter(); const key = `${c.id}:${c.epoch}`;
       if (this.active?.key === key && this.supervisor.child && this.active.generation === this.supervisor.generation) return;
+      this.semanticWriter?.cancel();
       await this.supervisor.start();
       if (this.active && this.active.generation === this.supervisor.generation) await this.supervisor.raw('lifecycle.retire', this.active);
       const result = await this.supervisor.raw('character.activate', {}, { character_id: c.id });
@@ -49,7 +53,8 @@ export class LocalCapabilities {
     const key = JSON.stringify([this.active.key, channel.kind, channel.account, channel.peer, shared]);
     if (!this.bindings.has(key)) {
       const result = await this.supervisor.raw('session.bind', this.active, { platform: management ? 'local' : channel.kind.startsWith('qq') ? 'qq' : channel.kind, account_id: channel.account || 'local', conversation_id: channel.peer || 'local', principal_id: management ? 'owner:local' : channel.principal || channel.peer || 'pet:local', audience_scope, is_owner: management || shared || channel.kind === 'pet', management });
-      this.bindings.set(key, { ...this.active, session_binding: result.session_binding });
+      // Scope sharing never erases the original transport identity used by tools/turn gates.
+      this.bindings.set(key, { ...this.active, session_binding: result.session_binding, audience_scope, platform: management ? 'local' : channel.kind.startsWith('qq') ? 'qq' : channel.kind, account: String(channel.account || 'local'), conversation: String(channel.peer || 'local') });
     }
     return this.bindings.get(key);
   }
@@ -66,16 +71,25 @@ export class LocalCapabilities {
     if (this.mode !== 'local' || context.binding.key !== `${current.id}:${current.epoch}`) throw new CapabilityError('STALE_CHARACTER', '角色或后端已切换，本次回复已取消。');
     return this.supervisor.raw('context.validate', context.binding, { memory_epoch: context.memory_epoch });
   }
-  async ingest(context, source_event_id, text, { derivedFrom = [] } = {}) {
+  async beginTurn(channel) { if (!this.semanticWriter || this.mode !== 'local') return null; return this.semanticWriter.begin(await this.binding(channel)); }
+  endTurn(lease) { if (lease) this.semanticWriter?.end(lease); }
+  async ingest(context, source_event_id, text, { derivedFrom = [], actor = 'unknown' } = {}) {
+    if (typeof source_event_id !== 'string' || !source_event_id || source_event_id.length > 500) throw new CapabilityError('INVALID_REQUEST', '经历事件标识无效。');
+    if (!['user', 'assistant', 'external', 'unknown'].includes(actor)) throw new CapabilityError('INVALID_REQUEST', '经历来源类型无效。');
     if (!Array.isArray(derivedFrom) || derivedFrom.length > 20 || derivedFrom.some(source => !source || typeof source.id !== 'string' || !source.id || source.id.length > 200 || !Number.isSafeInteger(source.revision) || source.revision < 1) || new Set(derivedFrom.map(source => source.id)).size !== derivedFrom.length) throw new CapabilityError('INVALID_REQUEST', '派生来源版本无效。');
     await this.validate(context);
     // Persist intent first: an unknown IPC outcome must never permit rollback to legacy.
     this.state.written = true; this.persist();
-    try { return await this.supervisor.raw('memory.ingest', context.binding, { source_event_id, text, source_refs: [`event:${source_event_id}`], expected_memory_epoch: context.memory_epoch, ...(derivedFrom.length ? { derived_from: derivedFrom.map(source => source.id), source_revisions: Object.fromEntries(derivedFrom.map(source => [source.id, source.revision])) } : {}) }); }
+    const refs = [`event:${source_event_id}`, ...(actor !== 'unknown' ? [`writer-origin:${actor}:${crypto.createHash('sha256').update(source_event_id).digest('hex')}`] : [])];
+    try {
+      const result = await this.supervisor.raw('memory.ingest', context.binding, { source_event_id, text, source_refs: refs, expected_memory_epoch: context.memory_epoch, ...(derivedFrom.length ? { derived_from: derivedFrom.map(source => source.id), source_revisions: Object.fromEntries(derivedFrom.map(source => [source.id, source.revision])) } : {}) });
+      if (!result.duplicate) this.semanticWriter?.notify(context.binding);
+      return result;
+    }
     catch (e) { if (e.code === 'AUTO_WRITE_DISABLED') return { skipped: true, stored: false, memory_epoch: context.memory_epoch }; throw e; }
   }
   async management(op, params = {}) {
-    const allowed = new Set(['memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
+    const allowed = new Set([...TOOLS_UI_OPS.filter(op => op !== 'status'),'memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
     if (!allowed.has(op)) throw new CapabilityError('PERMISSION_DENIED', '管理操作未开放。');
     if (['memory.migrate','memory.correct','memory.delete','memory.suspend','memory.resume','backup.restore.commit'].includes(op)) { this.state.written = true; this.persist(); }
     try {
@@ -88,11 +102,13 @@ export class LocalCapabilities {
   }
   async setQqOwner(mapping) {
     if (mapping !== null && (!/^\d{1,20}$/.test(String(mapping.account)) || !/^\d{1,20}$/.test(String(mapping.peer)))) throw new CapabilityError('INVALID_REQUEST', '请输入有效的 QQ 账号与私聊联系人编号。');
+    this.semanticWriter?.cancel();
     if (this.active) await this.supervisor.raw('lifecycle.retire', this.active);
     this.active = null; this.bindings.clear(); this.state.qqOwner = mapping ? { account: String(mapping.account), peer: String(mapping.peer) } : null; this.persist(); return this.status();
   }
   async shareOwner(enabled) {
     if (typeof enabled !== 'boolean') throw new CapabilityError('INVALID_REQUEST', '共享选项必须是布尔值。');
+    this.semanticWriter?.cancel();
     if (this.active) await this.supervisor.raw('lifecycle.retire', this.active);
     this.active = null; this.bindings.clear(); this.state.shareOwner = enabled; this.persist(); return this.status();
   }

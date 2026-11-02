@@ -3091,7 +3091,8 @@ async function main() {
       st.unread = []; st.recentMessages = []; st.pendingThoughts = []; st.activeTopics = []; st.memberImpressions = {};
     }
     const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '');
-    return originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest);
+    try { return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
+    catch (error) { await localChannels.endSession(args.sessionId); throw error; }
   };
   const modelCatalogErrorLogged = new Set();
   async function fetchModelCatalog() {
@@ -15593,6 +15594,7 @@ async function main() {
             // collector 生命周期见 trackTurnEvent()：只为 turn/start 建、空壳 turn/end 即清。
             const { ended } = trackTurnEvent(frame.sessionId, frame.event);
             if (ended) {
+              try {
               // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
               // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
               const silentQueueNow = social.silentTurns.get(frame.sessionId) ?? [];
@@ -15877,6 +15879,7 @@ async function main() {
                   }
                 }
               }
+              } finally { await localChannels.endSession(frame.sessionId); }
             }
           } else if ((frame.type === 'question/requested' || frame.type === 'approval/requested') && learnerSessions.has(frame.sessionId)) {
             // 黑话学习会话不应向用户提问/请求审批；自动跳过，避免阻塞学习任务。

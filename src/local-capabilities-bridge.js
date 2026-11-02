@@ -44,7 +44,10 @@ export class LocalChannelBridge {
     this.channels.set(key, channel);
     const eventId = `${account}:${kind}:${peer}:${id}`;
     if (this.seen.has(eventId)) return;
-    const ctx = await this.request('context', channel, { query: '' });
+    // Protect the input context->ingest window too: a background commit here
+    // must not make a newly arrived ordinary message fail as stale.
+    const ctx = await this.request('turn.begin', channel, { query: '' });
+    try {
     const ingested = await this.request('ingest', channel, { context: ctx.context, eventId, text: String(text).slice(0, 16000) });
     if (ingested.duplicate) { this.seen.add(eventId); return; }
     if (kind === 'private') {
@@ -56,13 +59,15 @@ export class LocalChannelBridge {
     const events = this.events.get(key) || [];
     events.push({ id: eventId, context: ctx.context, neverPersisted: ingested.stored === false && ingested.skipped === true, text: String(text).slice(0, 8000) });
     this.events.set(key, events.slice(-20));
+    } finally { await this.request('turn.end', channel, { context: ctx.context }).catch(() => {}); }
   }
   async prepare(key, sessionId, token, persona = '') {
     const channel = this.channels.get(key);
     if (!channel) throw channelError('BINDING_INVALID', '该会话尚无可信 QQ 入站身份，请先发一条新消息。');
     if (this.sessions.has(sessionId)) throw channelError('STALE_CONTEXT', '本地模式拒绝向已有模型历史追加提示，请重新唤醒。');
     const pending = this.events.get(key) || [];
-    const ctx = await this.request('context', channel, { query: '' });
+    const ctx = await this.request('turn.begin', channel, { query: '' });
+    try {
     const resolved = pending.length
       ? await this.request('sources', channel, { context: ctx.context, eventIds: pending.map(event => event.id) })
       : { sources: [], memory_epoch: ctx.memory_epoch };
@@ -83,7 +88,7 @@ export class LocalChannelBridge {
     }
     await this.request('validate', channel, { context: ctx.context });
     const record = { key, channel, context: ctx.context, sessionId, proactive: events.length === 0, outreachId: `purpose:${Math.floor(Date.now() / 60000)}` };
-    for (const [id, old] of this.sessions) if (old.key === key) this.sessions.delete(id);
+    for (const [id, old] of this.sessions) if (old.key === key) { await this.endSession(id); this.sessions.delete(id); }
     for (const [id, old] of this.tokens) if (old.key === key) this.tokens.delete(id);
     this.sessions.set(sessionId, record); if (token) this.tokens.set(token, record);
     this.events.delete(key);
@@ -91,6 +96,13 @@ export class LocalChannelBridge {
       ? `需要发送时使用该会话工具，agentToken=${token}；可自然分条发送并等待新消息。发送后用 qq_set_wake_config 或 qq_mark_read 收尾。`
       : '请直接输出本轮最终回复，由桥接自动转发到当前受众。不要调用 QQ 发送工具，也不要调用 qq_wait_for_messages、qq_set_wake_config 或 qq_mark_read；无需等待或安排后续回合。';
     return `${persona}\n【本轮受众】${channel.kind}:${channel.peer}\n【有效记忆】\n${ctx.text || ''}\n【当前入站消息】\n${events.map(e => e.text).join('\n')}\n只回复当前受众。${delivery}不得读取旧记忆卡、完整归档、跨平台同步或其他会话。`;
+    } catch (error) { await this.request('turn.end', channel, { context: ctx.context }).catch(() => {}); throw error; }
+  }
+  async endSession(id) {
+    const record = this.sessions.get(id);
+    if (!record || record.intent || record.writerReleased) return;
+    record.writerReleased = true;
+    await this.request('turn.end', record.channel, { context: record.context }).catch(() => {});
   }
   enterSession(id) { this.origin.enterWith(this.sessions.get(id) || null); }
   enterToken(token) { this.origin.enterWith(this.tokens.get(token) || null); }
