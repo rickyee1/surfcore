@@ -11,13 +11,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const idle = () => {};
+let hookValues = null; let hookIndex = 0;
 const React = {
-  createElement: () => null,
+  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
   useCallback: (fn) => fn,
   useEffect: idle,
   useMemo: (fn) => fn(),
   useRef: (value) => ({ current: value }),
-  useState: (value) => [typeof value === 'function' ? value() : value, idle],
+  useState: (value) => [hookValues ? hookValues[hookIndex++] : typeof value === 'function' ? value() : value, idle],
 };
 
 let client = null;
@@ -447,4 +448,25 @@ assert.ok(source.includes('updatePromptSignature'), '按版本集合生成提醒
 assert.ok(source.includes('neverStarted'), '未启动（everConnected=false）也要过滤旧断线告警');
 assert.ok(source.includes('sl.everConnected === false'), '按 everConnected 判断“从未启动”');
 
-console.log('client contract tests OK');
+// Render the real BiliTab with controlled hook state: memory is absent in every case.
+const biliProps = { cfg: {}, set: idle, qq: {}, setQqPath: idle, admin: {}, setAdmin: idle, unified: { platforms: { start: { bili: false } } }, setUnified: idle, qqPrivate: [], qqAllowAll: false, overview: { bili: { available: false } }, busy: '', setBusy: idle, toast: idle, reload: idle, onSave: idle };
+function renderBili(accounts, checks = {}, error = '') {
+  hookValues = ['', {}, '', false, accounts, checks, error, '', [], '', null]; hookIndex = 0;
+  try { return client.__test.BiliTab(biliProps); } finally { hookValues = null; }
+}
+function nodes(tree) { return Array.isArray(tree) ? tree.flatMap(nodes) : tree && typeof tree === 'object' ? [tree, ...nodes(tree.children)] : []; }
+function words(tree) { return Array.isArray(tree) ? tree.map(words).join(' ') : tree && typeof tree === 'object' ? words(tree.children) : typeof tree === 'string' ? tree : ''; }
+const saved = { fish: { configured: true, name: '测试昵称', mid: '10001' }, owner: { configured: false } };
+const initial = renderBili(saved); const rendered = words(initial);
+assert.match(rendered, /测试昵称/); assert.match(rendered, /已保存凭据，尚未实时核查/);
+assert.match(rendered, /暂无记忆（不代表未登录）/); assert.doesNotMatch(rendered, /先扫码登录/);
+assert.equal((rendered.match(/B站 登录账号/g) || []).length, 1, 'login card must appear once');
+const advanced = nodes(initial).find(node => node.type?.name === 'AdvancedSettings');
+assert.ok(advanced); assert.doesNotMatch(words(advanced), /B站 登录账号/, 'login status must not be hidden in advanced settings');
+assert.match(words(renderBili(saved, { fish: { ok: true, account: { name: '测试昵称', mid: '10001' } } })), /登录有效：测试昵称/);
+const failed = renderBili(saved, { fish: { ok: false, error: '核查失败', hint: '检查网络后重试' } });
+assert.ok(nodes(failed).some(node => node.props.role === 'alert' && /检查网络后重试/.test(words(node))));
+const unavailable = renderBili(null, {}, '读取失败 · 检查连接后重试');
+assert.ok(nodes(unavailable).some(node => node.props.role === 'alert' && /检查连接后重试/.test(words(node))));
+assert.match(words(unavailable), /刷新账号记录/); assert.match(words(unavailable), /账号记录读取失败/);
+console.log('client contract tests OK; rendered Bili account status checks PASS');

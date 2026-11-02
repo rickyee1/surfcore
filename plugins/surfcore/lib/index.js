@@ -69,6 +69,7 @@ import { PlatformRegistry } from './platforms.js';
 import { ExtensionHost } from './extensions.js';
 import { isLoopbackReq, json, readBody, sameOrigin } from './http-guard.js';
 import { startScheduler } from './scheduler.js';
+import { createBiliDrafts, createBiliDraftHandler } from './bili-drafts.js';
 import { createTokenBudgetService } from './token-budget.js';
 import { scanPluginCompatibility } from './compat.js';
 import { createGateEventStore } from '../../../src/gate-events.js';
@@ -711,6 +712,9 @@ export function apply(ctx) {
   const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
   route('exact', '/dsh-surfcore/local-capabilities', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/api', localManagement);
+  const biliDraftHandler = createBiliDraftHandler(createBiliDrafts({ ctx }));
+  route('exact', `${API_PREFIX}/bili/drafts/read`, biliDraftHandler);
+  route('exact', `${API_PREFIX}/bili/drafts/generate`, biliDraftHandler);
 
   // ── 概览 ────────────────────────────────────────────────────────────────
   async function overview() {

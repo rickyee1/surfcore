@@ -3468,6 +3468,52 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         }) : null);
     }
 
+    function BiliDraftCard() {
+      const [input, setInput] = useState("");
+      const [source, setSource] = useState(null);
+      const [result, setResult] = useState(null);
+      const [working, setWorking] = useState("");
+      const [error, setError] = useState("");
+      const [copied, setCopied] = useState(false);
+      const failure = (e) => setError([e.code, e.message || "操作失败", e.hint || "请稍后重试。"].filter(Boolean).join(" · "));
+      const read = async () => {
+        setWorking("read"); setError(""); setSource(null); setResult(null); setCopied(false);
+        try {
+          const value = await api("/bili/drafts/read", { method: "POST", body: { input } });
+          setSource(value.source);
+        } catch (e) { failure(e); } finally { setWorking(""); }
+      };
+      const generate = async () => {
+        setWorking("generate"); setError(""); setResult(null); setCopied(false);
+        try {
+          const value = await api("/bili/drafts/generate", { method: "POST", body: { bvid: source.bvid } });
+          setSource(value.source); setResult(value);
+        } catch (e) { failure(e); } finally { setWorking(""); }
+      };
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(result.draft); setCopied(true); setError(""); }
+        catch { setError("复制失败，请选中下面的草稿文字手动复制。"); }
+      };
+      return h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
+        h("h4", null, "公开视频评论草稿"),
+        h("p", null, "输入视频号或官方链接，读取公开资料，生成仅在本页展示的评论草稿。"),
+        h("input", { className: "qbw-input", style: { width: "100%", boxSizing: "border-box" }, "aria-label": "B站视频号或链接", placeholder: "BV… 或 https://www.bilibili.com/video/BV…", maxLength: 512, value: input, disabled: !!working,
+          onChange: (e) => { setInput(e.target.value); setSource(null); setResult(null); setError(""); setCopied(false); } }),
+        h("div", { className: "qbw-actions" },
+          h(Btn, { onClick: read, disabled: !!working || !input.trim() }, working === "read" ? "读取中…" : "读取公开视频"),
+          h(Btn, { onClick: generate, disabled: !!working || !source }, working === "generate" ? "生成中…" : "生成本地草稿")),
+        error ? h("div", { className: "qbw-err", role: "alert" }, error) : null,
+        source ? h("div", null,
+          h("a", { href: source.url, target: "_blank", rel: "noopener noreferrer" }, source.title),
+          h("p", { className: "qbw-hint" }, `作者：${source.author}`),
+          h("p", { style: { whiteSpace: "pre-wrap", maxHeight: "180px", overflow: "auto" } }, source.description || "（暂无简介）"),
+          h("p", { className: "qbw-hint" }, "材料范围：仅标题、作者和简介，未读取完整视频。")) : null,
+        result ? h("div", null,
+          h("p", { className: "qbw-hint" }, result.basis),
+          h("textarea", { className: "qbw-input", style: { width: "100%", boxSizing: "border-box", minHeight: "160px" }, "aria-label": "本地评论草稿", rows: 5, readOnly: true, value: result.draft }),
+          h(Btn, { kind: "qbw-btn2", onClick: copy }, copied ? "已复制" : "复制草稿")) : null);
+    }
+
     function BiliTab({ cfg, set, qq, setQqPath, admin, setAdmin, unified, setUnified, qqPrivate, qqAllowAll, overview, busy, setBusy, toast, reload, onSave }) {
       const [query, setQuery] = useState("");
       const [cookie, setCookie] = useState({ sessdata: "", bili_jct: "", buvid3: "" });
@@ -3475,8 +3521,10 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const [qrFish, setQrFish] = useState(false);
       const [accounts, setAccounts] = useState(null);
       const [accountCheck, setAccountCheck] = useState({});
+      const [accountsError, setAccountsError] = useState("");
       const loadAccounts = useCallback(async () => {
-        try { setAccounts(await api("/bili/accounts")); } catch { setAccounts(null); }
+        try { setAccounts(await api("/bili/accounts")); setAccountsError(""); }
+        catch (e) { setAccounts(null); setAccountsError([e.message || "读取账号记录失败", e.hint || "检查连接后重新核查；只有凭据失效时才需要扫码。"].join(" · ")); }
       }, []);
       useEffect(() => { loadAccounts(); }, [loadAccounts]);
       const verifyAccount = async (target) => {
@@ -3488,7 +3536,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           else toast(`✗ 核查失败：${r.error || "原因不明"}`);
           await loadAccounts();
         } catch (e) {
-          setAccountCheck((s) => ({ ...s, [target]: { ok: false, error: e.message } }));
+          setAccountCheck((s) => ({ ...s, [target]: { ok: false, error: e.message, hint: e.hint || "检查网络后重试核查；只有凭据失效时才需要扫码。" } }));
         }
       };
       const [deps, setDeps] = useState("");
@@ -3511,22 +3559,25 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const accountCard = h("div", { className: "qbw-card", style: { marginTop: "10px" } },
         h("h4", null, "B站 登录账号"),
         h("div", { className: "qbw-hint", style: { marginTop: "2px" } },
-          "显示扫码登录的账号；「核查」会读凭据文件再问一次 B站，确认登录还有效、mid 没串。"),
+          "已保存凭据不代表当前登录仍有效；点「核查登录」确认账号与有效性。"),
+        h(Btn, { kind: "qbw-btn2", onClick: loadAccounts }, "刷新账号记录"),
+        accountsError ? h("div", { className: "qbw-err", role: "alert" }, accountsError) : null,
         [["fish", "小肥鱼"], ["owner", "主人"]].map(([target, label]) => {
           const acc = target === "owner" ? accounts?.owner : accounts?.fish;
           const chk = accountCheck[target] || {};
           return h("div", { key: target, style: { marginTop: "8px", padding: "8px 10px", border: "1px solid rgba(127,127,127,.2)", borderRadius: "8px" } },
             h("div", { style: { fontWeight: 600 } },
               `${label}：`,
-              acc?.configured ? `${acc.name || "（未取到昵称）"}（${acc.mid}）` : "未登录",
+              acc?.configured ? `${acc.name || "（未取到昵称）"}（${acc.mid}）` : accounts ? "未保存凭据" : accountsError ? "账号记录读取失败" : "正在读取账号记录…",
               chk.busy ? h("span", { className: "qbw-hint" }, " 核查中…") : null),
+            acc?.configured && chk.ok === undefined && !chk.busy ? h("div", { className: "qbw-hint" }, "已保存凭据，尚未实时核查") : null,
             acc?.savedAt ? h("div", { className: "qbw-hint" }, `保存时间：${new Date(acc.savedAt).toLocaleString("zh-CN", { hour12: false })}`) : null,
             h("div", { style: { display: "flex", gap: "8px", marginTop: "6px", flexWrap: "wrap" } },
               h(Btn, { kind: "qbw-btn2", onClick: () => verifyAccount(target), disabled: !!chk.busy || !acc?.configured }, "核查登录"),
-              target === "fish" ? h(Btn, { kind: "qbw-btn2", onClick: () => setQrFish(true) }, acc?.configured ? "重新扫码" : "扫码登录") : null),
+              target === "fish" ? h(Btn, { kind: "qbw-btn2", onClick: () => setQrFish(true) }, acc?.configured ? "重新扫码小肥鱼" : "扫码登录小肥鱼") : null),
             chk.ok === true ? h("div", { className: "qbw-hint", style: { color: "#67c23a", marginTop: "4px" } },
               `✓ 登录有效：${chk.account?.name || "（未取到昵称）"}（${chk.account?.mid}）`) : null,
-            chk.ok === false ? h("div", { className: "qbw-err", style: { marginTop: "4px" } },
+            chk.ok === false ? h("div", { className: "qbw-err", role: "alert", style: { marginTop: "4px" } },
               `✗ ${chk.error || "核查失败"}${chk.hint ? `（建议：${chk.hint}）` : ""}`) : null);
         }));
 
@@ -3575,14 +3626,14 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           running: Boolean(overview?.scheduler?.running),
           overview,
         }),
+        accountCard,
+        h(BiliDraftCard),
         h(AdminCard, { admin, onChange: setAdmin, qqPrivate, qqAllowAll, toast }),
         h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
-          h("h4", null, "B站 账号"),
-          h("div", { className: "qbw-kv" }, h("span", null, "登录态"), h("span", null, bili.available ? `记忆已生成 · ${bili.briefChars ?? 0} 字` : "暂无记忆（先扫码登录）")),
+          h("h4", null, "B站 记忆"),
+          h("div", { className: "qbw-kv" }, h("span", null, "记忆状态"), h("span", null, bili.available ? `记忆已生成 · ${bili.briefChars ?? 0} 字` : "暂无记忆（不代表未登录）")),
           h("div", { className: "qbw-kv" }, h("span", null, "隐私复检"), h("span", null, bili.blocked ? "命中拦截" : "通过")),
-          h("p", null, "推荐扫码登录小肥鱼（用 B站 App 扫一扫）；手动粘贴 cookie 和待审核队列在「高级设置」里。"),
-          h("div", { className: "qbw-actions", style: { borderTop: "none", marginTop: "6px", paddingTop: "0" } },
-            h(Btn, { onClick: () => setQrFish(true), disabled: !!busy }, "扫码登录小肥鱼"))),
+          h("p", null, "记忆状态与账号登录分别显示；读取公开视频和生成本地草稿不要求先生成记忆。")),
         h(QqShareSection, { qq, set: setQqPath, data: automation, busy, setBusy, toast }),
         h(Section, { title: "作息窗口", note: "C 模式：每个窗口至少 1 次；全天上限见「每天最多醒来」，剩余次数按该时段最近评分分配，相邻两次至少隔「最小间隔」", defaultOpen: true },
           h("div", { style: { padding: "6px 0" } }, h(WindowsEditor, { value: cfg?.night?.windows, onChange: (v) => set(["night", "windows"], v) }))),
@@ -3611,7 +3662,6 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
                 h("input", { className: "qbw-input", placeholder: "buvid3（可空）", value: cookie.buvid3, onChange: (e) => setCookie((s) => ({ ...s, buvid3: e.target.value })) }),
                 h(Btn, { kind: "qbw-btn2", onClick: saveCookie, disabled: !!busy || !cookie.sessdata || !cookie.bili_jct }, "写入凭据"),
                 cookieMsg ? h("div", { className: cookieMsg.startsWith("✓") ? "qbw-ok" : "qbw-err" }, cookieMsg) : null)),
-          accountCard,
             h("div", { className: "qbw-card" }, h("h4", null, "待审核"),
               h("p", null, "她回复别人之前，草稿先到这儿；你点「发」才发。"),
               pending.length === 0 ? h("p", null, "（队列是空的）") : pending.map((x) => h("div", { key: x.id, className: "qbw-item", style: { marginTop: "6px" } },
@@ -6215,7 +6265,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;
     // 仅供 Node 契约测试验证路径归一化；浏览器运行时不使用。
-    exports.__test = { pathKeys, setPath };
+    exports.__test = { pathKeys, setPath, BiliTab };
     return module.exports;
   },
 });

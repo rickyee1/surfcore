@@ -2,6 +2,8 @@
 
 ## 2026-11-02：路遥融合fork
 
+本轮还修复审计发现的既有语音安装进度竞态：复制/解压后维持 99% 非终态，配置清洗和后置步骤成功后才报告完成；清洗拒绝不会登记成功。确定性回归、语音导入9项、默认值和最终 `test:audit` 108/108 通过。此修复不代表真实语音能力验收，见 [完成状态 case](cases/2026-11-02-voice-install-completion.md)。
+
 当前 fork 基于上游 `59ec3066`，版本仍 `0.8.6`；本地能力实现与边界见 [实施记录](cases/2026-11-02-local-capabilities.md)，运行见 [LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。原路遥目录和用户默认 `~/.dsh` 未改动；运行时、凭据、备份和证据全部留在忽略提交的本机目录，不发布。
 
 隔离 DSH/记忆管理可由 `scripts/local-deployment.ps1` 管理；真实 DeepSeek 回复、记忆纠错/删除及隔离服务生命周期/持久化已通过，见 [本地部署记录](cases/2026-11-02-local-deployment.md)。surfpet v0.2.3 与 Electron 45 已核验官方 SHA；真实桌宠 API/UI 文本烟测、正常重启后的设置摘要保留、ACL 后在线健康通过。
@@ -9,6 +11,8 @@
 用户已手动部署并登录 SnowLuma v2.3.4；HTTP/WS 独立凭证接入，QQ 桥接当前为 `chat`，已连接且账号/DSH 在线。准备阶段 QQ 自启关闭，当前运行阶段 `platforms.start.qq=true`，`bridge.autoStart` 随之镜像 true；SnowLuma `allowLaunch=false`，B站、群聊、主动外发和自动历史补发仍关闭。主人首轮真实 QQ 私聊及两条平台回复历史已核对，但后续消息延迟约 356 秒。根因为 reserved2 旧代次 wait 失败、沉睡前观察与 pendingWakeKey 长回合占用；本轮选择持久切到 chat，并最小分流无令牌提示为最终文本自动转发。chat 模式已确认 `dshSynced=true` 且 5 秒轮询后保持；用户未重复答案的新提问获得 4 秒平台回复并正确召回先前合成口令，**主人普通私聊收发与记忆召回 PASS**。reserved2 连续私聊仍 **NOT_RESOLVED**、当前未启用；全部权限/代次守卫保留。实际身份不写入跟踪文档。
 
 chat 提示分流后的最终全仓库 `test:audit` 108/108 脚本通过（`.local/evidence/qq-pet-final-audit.log`）；后续 chat 提示分流的渠道集成 18 项、bridge audit 16 项、regressions 16 项通过。三处凭证日志脱敏：定向 30 项、bridge audit 16 项、regressions 16 项通过，外部 voice-tool 检查跳过。新 fork ACL 已收紧，保留 surfpet userdata 三棵 Chromium 运行时树所需能力 ACE；关键 25 项及整树最终独立复验通过。详见 [QQ/桌宠部署记录](cases/2026-11-02-qq-pet-deployment.md)。最终模式与平台证据为 `qq-chat-mode-sync.json`、`qq-chat-live-retest.json`（均在 `.local/evidence/`）；语音、同模型 30 场景、M3–M5 未完成，不宣称完整 M2 发布。
+
+同日 B站 追加（14:45）：用户选择扫码接入、读取内容与生成草稿；登录核查、依赖4项、真实公开资料读取、DeepSeek 完整本地草稿及复制均 PASS。B站 页新卡只读标题/作者/简介，不读完整视频或 QQ/桌宠私域，不建待审队列、不通知或发布，自动调度和原门禁保持关闭。真实联调修复了推理预算导致半句被误报成功，以及用空记忆误判未登录；模型按本机 SDK 使用 off/1600，只接受正常 stop，异常明确提示。10组草稿/路由、账号渲染契约、完整插件测试和最终 audit 108/108 通过，regressions 16项通过；独立验收 PASS。隔离服务已重启，QQ chat 与账号在线、桌宠运行，见 [B站草稿记录](cases/2026-11-02-bili-readonly-drafts.md)。
 
 > 给「半天后的我」和接手的人：**现在做到哪、什么没验证、下一步按什么顺序做**。
 > 每次开工先读这里，收工前更新这里。时间一律写本地时间（Asia/Shanghai）。
