@@ -1700,7 +1700,18 @@ let stateDirHardened = null;
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
-  const localChannels = new LocalChannelBridge({ config: () => cfg });
+  const localChannels = new LocalChannelBridge({ config: () => cfg, currentCharacter: () => readCurrentCharacter(),
+    continuity: () => localBackendGuarded() && currentMode === 'reserved2',
+    onSupersede: ({ key, sessionId, retry, triggerKey }) => {
+      if (!localBackendGuarded() || currentMode !== 'reserved2' || state.sessions[key] !== sessionId) return;
+      // Retire only this model generation, retaining the conversation's wake
+      // configuration and unread business state. New ingress follows the normal
+      // batch/priority path below; a foreign audience never supplies its prompt.
+      drainPromptQueue(key, '旧本地回合已由新入站代次接管');
+      retireSession(key);
+      if (retry && triggerKey !== key) scheduleWakeV2(key, 'backlog');
+    },
+  });
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
@@ -3082,6 +3093,7 @@ async function main() {
   localChannels.authHeaders = async () => ({ cookie: await api.ensureAuth() });
   const originalSessionPrompt = api.sessions.prompt.bind(api.sessions);
   api.sessions.prompt = async (args, ...rest) => {
+    const packageGate = localChannels.assertReady();
     if (!localBackendGuarded()) return originalSessionPrompt(args, ...rest);
     const key = reverse.get(args.sessionId);
     if (!key) throw channelError('BINDING_INVALID', '本地模式不允许无可信渠道的模型提示。');
@@ -3091,7 +3103,8 @@ async function main() {
       st.unread = []; st.recentMessages = []; st.pendingThoughts = []; st.activeTopics = []; st.memberImpressions = {};
     }
     const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '');
-    try { return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
+    if (!isCurrentSession(key, args.sessionId)) { await localChannels.endSession(args.sessionId); throw channelError('TURN_SUPERSEDED', '提示准备期间回合已被新入站接管。'); }
+    try { localChannels.assertReady(packageGate); return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
     catch (error) { await localChannels.endSession(args.sessionId); throw error; }
   };
   const modelCatalogErrorLogged = new Set();
@@ -3111,8 +3124,9 @@ async function main() {
   const pendingSendToolCalls = new Map(); // sessionId -> Set<callId>：等待 tool/result 的发送类调用
   // reserved2 防“忘记设置唤醒条件”：key -> 当前是否等待 AI 处理唤醒回合 / 本回合已更新唤醒配置 / 连续未设置次数
   const pendingWakeKeys = new Set();
-  // key -> 开始等待的时间戳（带租约）：正在执行 qq_wait_for_messages 长轮询的会话，防止同一会话并发挂起。
-  // 存时间戳而不是单纯放进 Set，是因为 handler 中间任何异常都会跳过 finishWait ——
+  const pendingWakeOwners = new Map(); // key -> unique in-flight wake, never a timestamp
+  // key -> 独立对象租约（含 startedAt）：同一会话只挂一个 qq_wait_for_messages。
+  // 对象身份防止旧等待清新租约；时间用于接管残留，而非单纯放进 Set ——
   // 那样这个 key 会被永远 429 掉（DSH 的 fetch 不会主动断开连接，req 'close' 也不会触发）。
   const activeWaits = new Map();
   // 连续 wait 计数（2026-10-22）：模型会在一个回合里反复「等消息 → 再等消息」，
@@ -3300,7 +3314,9 @@ async function main() {
     const old = pendingWakeLeaseTimers.get(key);
     if (old) clearTimeout(old);
     const timer = setTimeout(() => {
+      if (pendingWakeLeaseTimers.get(key) !== timer) return;
       pendingWakeKeys.delete(key);
+      pendingWakeOwners.delete(key);
       pendingWakeLeaseTimers.delete(key);
     }, 30 * 60 * 1000);
     timer.unref?.();
@@ -3546,6 +3562,7 @@ async function main() {
     cancelSocialTimers(key);
     disarmPendingWakeLease(key);
     pendingWakeKeys.delete(key);
+    pendingWakeOwners.delete(key);
     const st = socialV2.conversations.get(key);
     if (st) {
       // 保留旧 token 在脱敏集合中，但撤销它的调用权限。
@@ -4279,7 +4296,10 @@ async function main() {
           res.end(JSON.stringify(value, null, 2));
         };
         if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) && obj.ok !== false) {
-          void localChannels.validateOrigin().then(() => emit(obj, status), error => emit({ ok: false, code: error.code, error: error.message, hint: error.hint }, 409));
+          void localChannels.validateOrigin().then(() => {
+            if (['/api/socialV2/close', '/api/socialV2/mark-read', '/api/socialV2/wake-config'].includes(url.pathname)) localChannels.acknowledgeOrigin();
+            emit(obj, status);
+          }, error => emit({ ok: false, code: error.code, error: error.message, hint: error.hint }, 409));
         } else emit(obj, status);
       };
       const readBody = () => new Promise((resolve, reject) => {
@@ -5467,6 +5487,28 @@ async function main() {
           }
           return;
         }
+        if (url.pathname === '/api/tools/invalidate' || url.pathname === '/api/tools/deliver') {
+          if (req.method !== 'POST' || req.headers.origin || req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
+            sendJson({ ok: false, code: 'PERMISSION_DENIED', error: '本机工具接线仅允许可信宿主调用。', hint: '在本机工具页核对原请求。' }, 403); return;
+          }
+          let body;
+          try { body = await readBody(); }
+          catch (error) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '本机工具宿主请求必须是有界 JSON 对象。', hint: '使用已登记的宿主请求，不要传正文或目标。' }, Number(error.statusCode) || 400); return; }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '本机工具宿主请求必须是 JSON 对象。', hint: '使用已登记的宿主请求，不要传正文或目标。' }, 400); return; }
+          if (url.pathname === '/api/tools/invalidate') {
+            if (Object.keys(body).length) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '取消请求不接受正文。', hint: '使用本机工具页。' }, 400); return; }
+            localChannels.invalidate();
+            clearAllSocialV2Timers(); cancelAllSocialTimers(); clearAllPendingWakeLeases(); drainAllPromptQueues('本机权限代次变化，旧投递已取消');
+            for (const key of Object.keys(state.sessions)) retireSession(key);
+            sendJson({ ok: true }); return;
+          }
+          if (Object.keys(body).length !== 1 || typeof body.deliveryId !== 'string' || !/^[a-f0-9]{48}$/.test(body.deliveryId)) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '工具投递只接受宿主单次凭据。', hint: '不得指定正文或目标。' }, 400); return; }
+          try {
+            await localChannels.withToolDelivery(body.deliveryId, { guard: companionSendGuard, deliver: (text, key) => onebotSend('private', key.split(':')[1], text) });
+            sendJson({ ok: true, outcome: 'sent' });
+          } catch (error) { sendJson({ ok: false, outcome: error.deliveryOutcome || 'unknown', code: error.code || 'TOOL_DELIVERY_UNKNOWN', error: '工具投递未确认，不会重发。', hint: '核对实际私聊与本机工具收据。' }, 409); }
+          return;
+        }
         // Host-issued one-shot deliveries carry no caller-selected text or target.
         if (url.pathname === '/api/companion/readiness' || url.pathname === '/api/companion/deliver') {
           if (req.headers.origin || req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
@@ -5943,6 +5985,7 @@ async function main() {
           }
           saveState();
           pendingWakeKeys.clear();
+          pendingWakeOwners.clear();
           clearAllPendingWakeLeases();
           wakeConfigUpdatedKeys.clear();
           markReadCalledKeys.clear();
@@ -7859,11 +7902,11 @@ async function main() {
             }
             waitStreaks.set(leaseKey, { count: count + 1, lastAt: now });
           }
-          if (activeWaits.has(leaseKey) && Date.now() - activeWaits.get(leaseKey) < ACTIVE_WAIT_LEASE_MS) {
+          if (activeWaits.has(leaseKey) && Date.now() - activeWaits.get(leaseKey).startedAt < ACTIVE_WAIT_LEASE_MS) {
             sendJson({ ok: false, error: '该会话已有一个等待中的 qq_wait_for_messages，请等待它结束' }, 429);
             return;
           }
-          const leaseStamp = Date.now();
+          const leaseStamp = { startedAt: Date.now() };
           activeWaits.set(leaseKey, leaseStamp);
           // 只由「自己那一份租约」负责删除：超时接管后，旧等待结束时不能把新租约删掉。
           const finishWait = () => { if (activeWaits.get(leaseKey) === leaseStamp) activeWaits.delete(leaseKey); };
@@ -7902,6 +7945,9 @@ async function main() {
           let lastNewAt = 0;
           let aborted = false;
           req.on('close', () => { aborted = true; });
+          const waitStillCurrent = () => socialV2.conversations.get(canonicalV2Key(key)) === st &&
+            (!req.headers['x-agent-token'] || (currentMode === 'reserved2' && !socialV2.paused && cfg.socialV2?.enabled !== false
+              && agentTokenOk(key, req.headers['x-agent-token']) && v2SessionAllowed(key) && v2ToolEnabled('waitMessages')));
           if (replyWait) {
             const incomingAt = () => {
               const value = Number(st.lastIncomingAt);
@@ -7911,7 +7957,7 @@ async function main() {
             let observedSeq = st.lastUnreadSeq || 0;
             // Batch delay and model reading time already count towards quiet.
             // New arrivals restart quiet, but timeoutMs remains a hard budget.
-            while (!aborted && Date.now() - start < timeoutMs) {
+            while (!aborted && waitStillCurrent() && Date.now() - start < timeoutMs) {
               if ((st.lastUnreadSeq || 0) !== observedSeq) {
                 observedSeq = st.lastUnreadSeq || 0;
                 lastNewAt = incomingAt();
@@ -7924,14 +7970,14 @@ async function main() {
             // Its timestamp must still invalidate the previous quiet window.
             lastNewAt = incomingAt();
             arrived = (st.lastUnreadSeq || 0) > baseline;
-          } else while (Date.now() - start < timeoutMs && !aborted) {
+          } else while (Date.now() - start < timeoutMs && !aborted && waitStillCurrent()) {
             let nowSeq = st.lastUnreadSeq || 0;
             if (nowSeq - baseline >= minNew) {
               arrived = true;
               lastNewAt = Date.now();
               // 已等到新消息：继续等到“最后一条新消息之后 quietMs 内不再有新消息”再返回。
               // 这里不再受原始 timeoutMs 限制，确保对方可能连续发消息时不会抢话。
-              while (Date.now() - lastNewAt < quietMs && Date.now() - start < timeoutMs + maxQuietMs + 5000 && !aborted) {
+              while (Date.now() - lastNewAt < quietMs && Date.now() - start < timeoutMs + maxQuietMs + 5000 && !aborted && waitStillCurrent()) {
                 if ((st.lastUnreadSeq || 0) > nowSeq) {
                   nowSeq = st.lastUnreadSeq || 0;
                   lastNewAt = Date.now();
@@ -8825,6 +8871,7 @@ async function main() {
           cancelSocialTimers(key);
           clearSocialV2Timers(key);
           pendingWakeKeys.delete(key);
+          pendingWakeOwners.delete(key);
           wakeConfigUpdatedKeys.delete(key);
           markReadCalledKeys.delete(key);
           wakeConfigMissCount.delete(key);
@@ -9809,6 +9856,7 @@ async function main() {
 
   function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
     const assertSendAllowed = captureSendGuard(key);
+    const cancellableGap = localBackendGuarded() && currentMode === 'reserved2';
     const [kind, id] = key.split(':');
     const sent = [];
     const failed = [];
@@ -9828,7 +9876,14 @@ async function main() {
         });
       if (i < delays.length) {
         const d = delays[i];
-        sendChain = sendChain.then(() => sleep(d));
+        sendChain = sendChain.then(async () => {
+          if (!cancellableGap) return sleep(d);
+          const until = Date.now() + d;
+          while (Date.now() < until) {
+            assertSendAllowed();
+            await sleep(Math.min(100, until - Date.now()));
+          }
+        });
       }
     }
     return sendChain.then(() => {
@@ -12120,7 +12175,9 @@ async function main() {
     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
     const wakeBlocked = () => opts.wakeReason && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false);
     const skipWake = () => {
+      if (opts.wakeOwner && pendingWakeOwners.get(key) !== opts.wakeOwner) return { ok: true, skipped: true };
       pendingWakeKeys.delete(key);
+      pendingWakeOwners.delete(key);
       disarmPendingWakeLease(key);
       return { ok: true, skipped: true };
     };
@@ -13920,10 +13977,14 @@ async function main() {
       if (idx >= 0) st.wakeTimes.splice(idx, 1);
       saveSocialV2State();
     };
+    const wakeOwner = {};
+    const ownsWake = () => pendingWakeOwners.get(key) === wakeOwner;
     try {
       pendingWakeKeys.add(key);
+      pendingWakeOwners.set(key, wakeOwner);
       armPendingWakeLease(key);
-      const result = await deliverPrompt(key, promptText, { wakeReason: reason });
+      const result = await deliverPrompt(key, promptText, { wakeReason: reason, wakeOwner });
+      if (!ownsWake()) return;
       const restoreFiniteSleep = () => {
         if (hadFiniteSleep) {
           st.wakeConfig.sleepUntil = prevSleepUntil;
@@ -13934,6 +13995,7 @@ async function main() {
       };
       if (result && result.ok === false) {
         pendingWakeKeys.delete(key);
+        pendingWakeOwners.delete(key);
         disarmPendingWakeLease(key);
         rollbackWakeTime();
         restoreFiniteSleep();
@@ -13944,7 +14006,9 @@ async function main() {
         log(`[reserved2] 唤醒已入队 ${key}（${reason}），等待 DSH 恢复后补投`);
       }
     } catch (error) {
+      if (!ownsWake()) return;
       pendingWakeKeys.delete(key);
+      pendingWakeOwners.delete(key);
       disarmPendingWakeLease(key);
       rollbackWakeTime();
       if (hadFiniteSleep) {
@@ -14533,6 +14597,7 @@ async function main() {
   function clearAllSocialV2Timers() {
     for (const key of socialV2.conversations.keys()) clearSocialV2Timers(key);
     pendingWakeKeys.clear();
+    pendingWakeOwners.clear();
     wakeConfigUpdatedKeys.clear();
     markReadCalledKeys.clear();
     wakeConfigMissCount.clear();
@@ -14634,7 +14699,12 @@ async function main() {
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
-    await localChannels.incoming(key, event, plainContent);
+    const localIngress = await localChannels.incoming(key, event, plainContent);
+    if (localBackendGuarded() && localIngress?.duplicate) return;
+    if (localBackendGuarded() && localIngress) {
+      const toolResult = await localChannels.handleTools(key, localIngress, (text, target) => onebotSend('private', target.split(':')[1], text));
+      if (toolResult.handled) return;
+    }
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
@@ -14777,6 +14847,7 @@ async function main() {
           cancelSocialTimers(key);
           clearSocialV2Timers(key);
           pendingWakeKeys.delete(key);
+          pendingWakeOwners.delete(key);
           wakeConfigUpdatedKeys.delete(key);
           markReadCalledKeys.delete(key);
           wakeConfigMissCount.delete(key);
@@ -15654,6 +15725,7 @@ async function main() {
               // 则发送提醒；连续未设置达到上限后重置为默认唤醒配置。静默/后台提醒回合已在上方 continue，不触发。
               if (pendingWakeKeys.has(key)) {
                 pendingWakeKeys.delete(key);
+                pendingWakeOwners.delete(key);
                 disarmPendingWakeLease(key);
                 if (wakeConfigUpdatedKeys.has(key) || markReadCalledKeys.has(key)) {
                   ensureWakeableV2(getSocialV2State(key), { key });
@@ -15665,15 +15737,21 @@ async function main() {
                   const maxReminders = Number(cfg.socialV2?.wake?.maxWakeConfigReminders) || 2;
                   if (currentMiss < maxReminders) {
                     wakeConfigMissCount.set(key, currentMiss);
+                    const reminderOwner = {};
                     pendingWakeKeys.add(key);
+                    pendingWakeOwners.set(key, reminderOwner);
                     armPendingWakeLease(key);
                     deliverPrompt(key, buildWakeReminderPromptV2(key)).then((result) => {
+                      if (state.sessions[key] !== frame.sessionId || pendingWakeOwners.get(key) !== reminderOwner) return;
                       if (result && result.ok === false) {
                         pendingWakeKeys.delete(key);
+                        pendingWakeOwners.delete(key);
                         disarmPendingWakeLease(key);
                       }
                     }).catch((error) => {
+                      if (state.sessions[key] !== frame.sessionId || pendingWakeOwners.get(key) !== reminderOwner) return;
                       pendingWakeKeys.delete(key);
+                      pendingWakeOwners.delete(key);
                       disarmPendingWakeLease(key);
                       log(`[reserved2] ${key} 唤醒提醒投递失败: ${error?.message ?? error}`);
                     });
@@ -15958,6 +16036,7 @@ async function main() {
         v2TurnStartAt.clear();
         toolCallNames.clear();
         pendingWakeKeys.clear();
+        pendingWakeOwners.clear();
         clearAllPendingWakeLeases();
         social.exitingSessions.clear();
         wakeConfigUpdatedKeys.clear();
@@ -15991,7 +16070,17 @@ async function main() {
 
   for (const [method, kind] of [['sendPrivateMessage', 'private'], ['sendGroupMessage', 'group']]) {
     const deliver = bot[method].bind(bot);
-    bot[method] = (id, ...args) => localChannels.send(`${kind}:${id}`, () => deliver(id, ...args));
+    bot[method] = (id, ...args) => {
+      // SDK WebSocket request() awaits connect() internally before socket.send.
+      // Local mode uses the controlled HTTP seam so reconnect cannot delay an old send.
+      if (localBackendGuarded()) {
+        const message = args[0];
+        const segments = typeof message === 'string' ? [{ type: 'text', data: { text: message } }] : Array.isArray(message) ? message : message && typeof message === 'object' && typeof message.type === 'string' ? [message] : null;
+        if (!segments) throw channelError('INVALID_REQUEST', '本地发送只接受明确的消息段。');
+        return onebotSendSegments(kind, id, segments);
+      }
+      return localChannels.send(`${kind}:${id}`, () => deliver(id, ...args));
+    };
   }
   bot.onPrivateMessage(async (event) => {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，

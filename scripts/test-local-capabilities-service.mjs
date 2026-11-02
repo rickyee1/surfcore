@@ -9,7 +9,7 @@ if (!existsSync(interpreter)) {
   console.error('SERVICE_UNAVAILABLE: isolated Python missing. Install services/local-capabilities/requirements.txt into .venv or set SURFCORE_LOCAL_PYTHON.');
   process.exit(1);
 }
-for (const script of ['test-local-capabilities-service.py', 'test-local-capabilities-service-backend.py']) {
+for (const script of ['test-local-capabilities-service.py', 'test-local-capabilities-service-backend.py', 'test-local-capabilities-tools.py', 'test-local-capabilities-semantic.py', 'test-local-capabilities-media.py', 'test-role-package.py']) {
   const result = spawnSync(interpreter, [path.join(root, 'scripts', script)], {
     cwd: root, stdio: 'inherit', env: { ...process.env, PYTHONUTF8: '1' }, timeout: 120000,
   });

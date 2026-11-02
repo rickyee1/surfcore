@@ -16,8 +16,10 @@
  *   合成后的 wav 落在 ~/.dsh/surfcore/pet/voice/，通过 pet-api 的 /audio/<key>.wav 回给桌宠播放。
  *   气泡永远显示文字（语音只是附加），合成失败也照常返回文字。
  */
+import { captureTargetGate, assertTargetGate } from '../../../src/role-package-gate.js';
 import { localCapabilities } from './local-capabilities/host.js';
 import { CapabilityError, errorResult } from './local-capabilities/supervisor.js';
+import { explicitToolRequest } from './local-capabilities/tool-host.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -182,10 +184,32 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   const bootId = crypto.randomBytes(6).toString('hex');
   const presence = new Map();
   const audioFiles = new Map();
+  const audioGuards = new Map();
+  const transport = new WeakMap();
   let inFlight = 0;
   let lastChatAt = 0;
   let lastProactiveAt = 0;
   let lastError = '';
+
+  function roleCapture() {
+    try { return captureTargetGate(local.currentCharacter?.() || readCurrentCharacter()); }
+    catch (error) { throw new CapabilityError(error.code || 'ROLE_PACKAGE_PAUSED', error.message, error.hint); }
+  }
+  function roleCheck(captured) {
+    try { return assertTargetGate(captured, local.currentCharacter?.() || readCurrentCharacter()); }
+    catch (error) { throw new CapabilityError(error.code || 'ROLE_PACKAGE_PAUSED', error.message, error.hint); }
+  }
+  function bindDelivery(result, guard, receipt = null, sync = () => {}) {
+    const captured = roleCapture();
+    transport.set(result, { guards: [async () => { roleCheck(captured); await guard(); roleCheck(captured); }], sync: [() => { roleCheck(captured); sync(); roleCheck(captured); }], receipts: receipt ? [receipt] : [] }); return result;
+  }
+  async function validateDelivery(result) { const captured = roleCapture(); for (const guard of transport.get(result)?.guards || []) await guard(); roleCheck(captured); }
+  function validateDeliverySync(result) { roleCapture(); for (const guard of transport.get(result)?.sync || []) guard(); }
+  function finishDelivery(result, outcome) { const record = transport.get(result); if (!record) return; transport.delete(result); for (const receipt of record.receipts) receipt(outcome); }
+  function invalidateTransient() {
+    for (const event of events) { event.toolReceipt?.('unknown'); if (event.toolGuard) event.text = ''; }
+    events.length = 0; audioGuards.clear();
+  }
 
   function ensureDirs() {
     fs.mkdirSync(chatDir, { recursive: true });
@@ -470,13 +494,29 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   // ── 事件队列（主动搭话推给桌宠）──────────────────────────────────────────
   function emit(event) {
+    if (['reply', 'proactive'].includes(event.type)) event.packageCapture = roleCapture();
+    if (local.toolHost && local.guarded && ['reply', 'proactive'].includes(event.type)) event.hostCapture = local.toolHost.capture(petChannel);
     eventSeq += 1;
     events.push({ id: eventSeq, at: Date.now(), ...event });
     if (events.length > EVENT_LIMIT) events.splice(0, events.length - EVENT_LIMIT);
     return eventSeq;
   }
 
+  // Host-only media delivery shares actual HTTP/event receipts with fixed tools.
+  // It never enters ordinary chat history, Writer, TTS, or a DSH agent session.
+  function deliverEphemeral(envelope) {
+    return new Promise(resolve => {
+      let finished = false;
+      const receipt = outcome => { if (finished) return; finished = true; envelope.signal.removeEventListener('abort', aborted); resolve({ outcome }); };
+      const event = { type: 'reply', text: envelope.text, modality: 'text', messageId: `media:${crypto.randomUUID()}`, toolGuard: envelope.guard, toolSync: envelope.syncGuard, toolReceipt: receipt, memory_write: false, suppressHistory: true, suppressTts: true };
+      const aborted = () => { event.text = ''; receipt('unknown'); };
+      if (envelope.signal.aborted) { aborted(); return; }
+      envelope.signal.addEventListener('abort', aborted, { once: true }); emit(event);
+    });
+  }
+
   function notePresence(clientId = 'pet') {
+    local.mediaHost?.nativeClient(clientId);
     presence.set(String(clientId || 'pet'), Date.now());
   }
 
@@ -491,6 +531,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   async function poll({ since = null, waitMs = 20000, clientId = 'pet' } = {}) {
+    const packageGate = roleCapture();
     notePresence(clientId);
     const known = Number.isFinite(Number(since)) ? Number(since) : null;
     const deadline = Date.now() + Math.max(0, Math.min(60000, Number(waitMs) || 0));
@@ -521,8 +562,18 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       {
         const valid = [];
         for (const event of fresh) {
+          try { if (event.packageCapture) roleCheck(event.packageCapture); }
+          catch { event.toolReceipt?.('failed'); event.text = ''; event.delivered = true; continue; }
+          if (event.toolGuard) {
+            if (event.delivered) continue; event.delivered = true;
+            try { await event.toolGuard(); valid.push(event); }
+            catch { event.toolReceipt?.('failed'); event.text = ''; }
+            continue;
+          }
           if (!event.localContext) {
-            if (event.type !== 'proactive' || !local.guarded) valid.push(event);
+            if (event.type !== 'proactive' || !local.guarded) {
+              try { if (event.hostCapture) await local.toolHost.checkCapture(event.hostCapture); valid.push(event); } catch {}
+            }
             continue;
           }
           // Claim synchronously before any await. A second poll cannot release the same event.
@@ -553,7 +604,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       }
       if (fresh.length) {
         const last = fresh[fresh.length - 1].id;
-        return {
+        const payload = {
           ok: true,
           bootId,
           cursor: last,
@@ -561,6 +612,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
           config: publicConfig(),
           serverTime: Date.now(),
         };
+        const toolEvents = fresh.filter(event => event.toolGuard);
+        roleCheck(packageGate);
+        const guards = [() => roleCheck(packageGate), ...fresh.map(event => event.toolGuard || (event.localContext ? () => local.validate(event.localContext) : event.hostCapture ? () => local.toolHost.checkCapture(event.hostCapture) : null)).filter(Boolean)];
+        const sync = [() => roleCheck(packageGate), ...fresh.map(event => event.toolSync || (event.localContext?.binding.host_gate ? () => local.toolHost.validateCapture(event.localContext.binding.host_gate) : event.hostCapture ? () => local.toolHost.validateCapture(event.hostCapture) : null)).filter(Boolean)];
+        if (guards.length) transport.set(payload, { guards, sync, receipts: toolEvents.map(event => outcome => { event.toolReceipt?.(outcome); event.text = ''; }) });
+        return payload;
       }
       if (Date.now() >= deadline) {
         return { ok: true, bootId, cursor: known, events: [], config: publicConfig(), serverTime: Date.now() };
@@ -574,7 +631,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     if (typeof event.enabled === 'boolean') out.enabled = event.enabled;
     if (event.text) out.text = event.text;
     if (event.modality) out.modality = event.modality;
-    if (event.audioKey) {
+    if (event.audioKey && !local.mediaHost?.suppressLegacyAudio()) {
       const file = path.join(voiceDir, `${event.audioKey}.wav`);
       try {
         if (fs.existsSync(file)) {
@@ -587,6 +644,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       } catch {}
     }
     if (event.messageId) out.messageId = event.messageId;
+    if (event.toolGuard || event.memory_write === false) { out.memory_write = false; out.suppressHistory = true; out.suppressTts = true; }
     return out;
   }
 
@@ -603,13 +661,15 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         historyTurns: s.chat.historyTurns,
       },
       proactive: s.proactive,
-      voice: { enabled: s.voice.enabled, route: s.voice.route, maxChars: s.voice.maxChars },
+      voice: { enabled: s.voice.enabled && !local.mediaHost?.suppressLegacyAudio(), route: s.voice.route, maxChars: s.voice.maxChars, mediaSuppressed: local.mediaHost?.suppressLegacyAudio() === true, mediaSuppressionNonce: local.mediaHost?.audioPolicy().nonce || null },
       focus: readFocus(),
     };
   }
 
   // ── 语音 ────────────────────────────────────────────────────────────────
   async function synthesize(text) {
+    const packageGate = roleCapture();
+    if (local.mediaHost?.suppressLegacyAudio()) return { ok: false, code: 'MEDIA_SINGLE_OUTPUT', error: '已选择受控本地语音，旧语音合成已抑制。', hint: '在本机设备页确认并启动唯一语音输出；不会回退提供方。' };
     const v = voiceSettings();
     if (!v.enabled) return { ok: false, error: '语音合成未开启（设置 → 语音 → TTS）' };
     const spoken = clipForVoice(stripStageDirections(text), v.maxChars);
@@ -624,6 +684,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         cacheVersion: v.cacheVersion,
         outDir: voiceDir,
       });
+      roleCheck(packageGate);
       const key = path.basename(result.path, '.wav');
       audioFiles.set(key, result.path);
       return { ok: true, key, durationMs: result.durationMs, text: spoken };
@@ -637,13 +698,16 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   /** 供 pet-api 读 wav：只认 voice 目录里的 hash 文件名，不接受任意路径。 */
   function readAudio(key) {
+    try { roleCapture(); } catch { return null; }
+    if (local.mediaHost?.suppressLegacyAudio()) return null;
     const safe = String(key ?? '').replace(/[^a-f0-9]/gi, '');
     if (!safe || safe !== String(key ?? '')) return null;
     const file = audioFiles.get(safe) || path.join(voiceDir, `${safe}.wav`);
     try {
       const stat = fs.statSync(file);
       if (!stat.isFile() || stat.size < 44) return null;
-      return { file, bytes: fs.readFileSync(file) };
+      if (local.toolHost && local.guarded && !audioGuards.has(safe)) return null;
+      return { file, bytes: fs.readFileSync(file), ...audioGuards.get(safe) };
     } catch {
       return null;
     }
@@ -671,6 +735,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
    * reasoningEffort 默认 low：桌宠聊天要快，不需要长思考；off/low/high/max 由配置控制。
    */
   async function complete({ system, user, maxTokens = 800, temperature = 1, signal = null } = {}) {
+    const packageGate = roleCapture();
     const llm = ctx.get('llm');
     if (!llm?.stream) throw new Error('DSH 的 llm 服务不可用（无法发起模型调用）');
     const target = resolveModel();
@@ -690,12 +755,16 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       : [undefined];
     let lastFailure = null;
     for (const effort of attempts) {
+      roleCheck(packageGate);
+      if (signal?.aborted) throw new CapabilityError('HOST_SEND_BLOCKED', '旧桌宠模型回合已取消。');
       const options = effort ? { ...base, reasoningEffort: effort } : base;
       let text = '';
       let usage = null;
       try {
         const stream = llm.stream(options);
         for await (const chunk of stream) {
+          roleCheck(packageGate);
+          if (signal?.aborted) throw new CapabilityError('HOST_SEND_BLOCKED', '旧桌宠模型回合已取消。');
           if (!chunk) continue;
           if (chunk.type === 'text-delta' && chunk.text) text += chunk.text;
           else if (chunk.type === 'usage' && chunk.usage) usage = chunk.usage;
@@ -709,9 +778,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
             }
           }
         }
+        roleCheck(packageGate);
         return { text, usage, model: target.model };
       } catch (error) {
+        if (signal?.aborted) throw new CapabilityError('HOST_SEND_BLOCKED', '旧桌宠模型回合已取消。');
         if (error instanceof CapabilityError) throw error;
+        roleCheck(packageGate);
         lastFailure = error;
         // 只有「一个字都没吐出来」才换档重试，避免重复计费/半截回复。
         if (text) throw error;
@@ -791,11 +863,40 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   // ── 对外：聊天 ──────────────────────────────────────────────────────────
   async function chat({ text = '', modality = 'text' } = {}) {
+    let packageGate; try { packageGate = roleCapture(); } catch (error) { return errorResult(error); }
     const s = settings();
     if (!s.chat.enabled) return { ok: false, error: '桌宠对话已关闭（设置 → 桌宠 → 对话）' };
-    const say = String(text ?? '').trim().slice(0, MAX_INPUT_CHARS);
+    const rawSay = String(text ?? '').trim();
+    const toolRequested = Boolean(local.toolHost && local.guarded && explicitToolRequest(rawSay.slice(0, 16000)).length);
+    if (toolRequested && rawSay.length > MAX_INPUT_CHARS) return { ok: false, code: 'INVALID_REQUEST', error: '本次工具请求超过桌宠输入上限，未截断或执行。', hint: '缩短请求至1200字符；完整便签正文可用本机工具页核验。' };
+    const say = rawSay.slice(0, MAX_INPUT_CHARS);
     if (!say) return { ok: false, error: '说点什么吧' };
     const mode = modality === 'voice' ? 'voice' : 'text';
+    let toolInput;
+    try { if (local.toolHost && local.guarded) { await local.binding(petChannel); toolInput = local.toolHost.input(petChannel, { eventId: `pet:${crypto.randomUUID()}`, text: say }); } }
+    catch (error) { return errorResult(error); }
+    if (toolRequested) {
+      let lease;
+      try {
+        lease = await local.beginTurn(petChannel);
+        const original = await local.context(petChannel);
+        await local.ingest(original, `pet:tool-question:${crypto.randomUUID()}`, say, { actor: 'user' });
+        const answer = await local.toolHost.handle(toolInput, { deliver: envelope => new Promise(resolve => {
+          let finished = false;
+          const receipt = outcome => { if (finished) return; finished = true; envelope.signal.removeEventListener('abort', aborted); resolve({ outcome }); };
+          const event = { type: 'reply', text: envelope.text, modality: 'text', messageId: `tool:${crypto.randomUUID()}`, toolGuard: envelope.guard, toolSync: envelope.syncGuard, toolReceipt: receipt };
+          const aborted = () => { event.text = ''; receipt('unknown'); };
+          if (envelope.signal.aborted) { aborted(); return; }
+          envelope.signal.addEventListener('abort', aborted, { once: true }); emit(event);
+        }) });
+        if (answer.ok === false) return answer;
+        const reply = { id: `tool-status:${crypto.randomUUID()}`, role: 'assistant', text: `${answer.reply || '本次工具请求已处理。'}\n本机工具：${answer.managementUrl}`, modality: 'text', at: Date.now(), memory_write: false, suppressHistory: true, suppressTts: true };
+        const result = { ok: true, reply, remembered: 0, voice: null, tool: { state: answer.state, continuationId: answer.continuationId }, memory_write: false };
+        const context = await local.context(petChannel);
+        return bindDelivery(result, () => local.validate(context), null, () => local.toolHost.validateCapture(context.binding.host_gate));
+      } catch (error) { return errorResult(error); }
+      finally { local.endTurn(lease); }
+    }
     if (!llmReady()) {
       const failure = modelErrorResult();
       lastError = failure.error;
@@ -811,7 +912,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     inFlight += 1;
     const startedAt = Date.now();
     let localContext; let writerLease;
-    try { if (local.guarded) { writerLease = await local.beginTurn(petChannel); localContext = await local.context(petChannel, say); await local.call(petChannel, 'attention.respond'); } }
+    try { if (local.guarded) { if (toolInput) local.toolHost.validateInput(toolInput); writerLease = await local.beginTurn(petChannel); localContext = await local.context(petChannel, say); if (toolInput) local.toolHost.validateInput(toolInput); await local.call(petChannel, 'attention.respond'); } }
     catch (e) { local.endTurn(writerLease); inFlight -= 1; const failure = errorResult(e); lastError = failure.error; return failure; }
     const history = readHistory();
     const role = roleInfo();
@@ -826,11 +927,14 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     try {
       let result;
       try {
+        if (toolInput) local.toolHost.validateInput(toolInput);
+        roleCheck(packageGate);
         result = await complete({
           system,
           user,
           maxTokens: mode === 'voice' ? 400 : 700,
           temperature: s.chat.temperature,
+          signal: local.toolHost && localContext ? local.toolHost.signal(localContext.binding.host_gate) : null,
         });
       } catch (error) {
         if (error instanceof CapabilityError) throw error;
@@ -838,6 +942,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         lastError = failure.error;
         return failure;
       }
+      roleCheck(packageGate);
       recordUsage(result.usage, result.model);
       let reply = cleanReply(result.text);
       if (!reply) return { ok: false, error: '她这次没说话（模型返回空）' };
@@ -848,6 +953,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       const userMessage = { id: `u-${now}-${tokenHash(say).slice(0, 6)}`, role: 'user', text: say, modality: mode, at: now };
       const aiMessage = { id: `a-${now}-${tokenHash(reply).slice(0, 6)}`, role: 'assistant', text: reply, modality: mode, at: now };
       if (mode === 'voice') {
+        if (localContext) await local.validate(localContext);
         const tts = await synthesize(reply);
         if (tts.ok) {
           aiMessage.audioKey = tts.key;
@@ -861,8 +967,10 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         const saved = await local.ingest(localContext, `pet:${crypto.randomUUID()}`, say, { actor: 'user' });
         // Use only this transaction's epoch; never refresh over a concurrent correction.
         await local.validate({ ...localContext, memory_epoch: saved.memory_epoch });
+        localContext = { ...localContext, memory_epoch: saved.memory_epoch };
         localRemembered = !saved.skipped;
       }
+      roleCheck(packageGate);
       appendMessage(history, userMessage);
       appendMessage(history, aiMessage);
       history.lastUserAt = now;
@@ -876,7 +984,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       }));
       lastChatAt = now;
       lastError = '';
-      return {
+      if (aiMessage.audioKey) audioGuards.set(aiMessage.audioKey, { guard: async () => { roleCheck(packageGate); if (localContext) await local.validate(localContext); roleCheck(packageGate); }, syncGuard: () => { roleCheck(packageGate); if (localContext) local.toolHost?.validateCapture(localContext.binding.host_gate); } });
+      const payload = {
         ok: true,
         reply: publicMessage(aiMessage),
         userMessage,
@@ -884,8 +993,9 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         remembered,
         voice: aiMessage.audioKey ? { ok: true, key: aiMessage.audioKey } : (mode === 'voice' ? { ok: false, error: lastError || '语音合成失败，已用文字回复' } : null),
       };
+      return bindDelivery(payload, async () => { roleCheck(packageGate); if (localContext) await local.validate(localContext); }, null, () => { roleCheck(packageGate); if (localContext) local.toolHost?.validateCapture(localContext.binding.host_gate); });
     } catch (error) {
-      const failure = localContext || local.guarded ? errorResult(error) : { ok: false, error: String(error?.message ?? error).slice(0, 200) };
+      const failure = error instanceof CapabilityError || localContext || local.guarded ? errorResult(error) : { ok: false, error: String(error?.message ?? error).slice(0, 200) };
       lastError = failure.error;
       return failure;
     } finally {
@@ -896,6 +1006,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   /** 主动搭话：文字/语音两条路都一样——先入历史，再发事件；语音合成失败只降级成文字。 */
   async function proactive({ text, modality = 'text', purpose = null, localContext = null, outreach = null } = {}) {
+    let packageGate; try { packageGate = roleCapture(); } catch (error) { return errorResult(error); }
     if (local.guarded && (!localContext || !outreach)) return { ok: false, code: 'PERMISSION_DENIED', error: '主动消息缺少有效预留。', hint: '通过主动联系调度器重试。' };
     const s = settings();
     const raw = String(text ?? '').trim();
@@ -908,6 +1019,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const history = readHistory();
     const message = { id: `p-${now}-${tokenHash(body).slice(0, 6)}`, role: 'assistant', text: body, modality: mode, at: now, proactive: true };
     if (mode === 'voice') {
+      if (localContext) await local.validate(localContext);
       const tts = await synthesize(body);
       if (tts.ok) {
         message.audioKey = tts.key;
@@ -919,10 +1031,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       const check = await local.supervisor.raw('attention.check', localContext.binding, { outreach_id: outreach.id, reservation_id: outreach.reservation_id, memory_epoch: localContext.memory_epoch });
       if (!check.allowed) return { ok: false, code: 'PERMISSION_DENIED', error: `主动联系受限：${check.reason}`, hint: '检查注意力设置。' };
     }
+    try { roleCheck(packageGate); } catch (error) { return errorResult(error); }
     appendMessage(history, message);
     history.lastProactiveAt = now;
     history.lastAssistantAt = now;
     saveHistory(history);
+    if (message.audioKey) audioGuards.set(message.audioKey, { guard: async () => { roleCheck(packageGate); if (localContext) await local.validate(localContext); roleCheck(packageGate); }, syncGuard: () => { roleCheck(packageGate); if (localContext) local.toolHost?.validateCapture(localContext.binding.host_gate); } });
     const remembered = localContext ? 0 : rememberEvents(buildPetMemoryEvents({
       replyText: body,
       at: now,
@@ -948,6 +1062,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   function historyPayload(limit = 60) {
+    roleCapture();
     const history = readHistory();
     const role = roleInfo();
     return {
@@ -1017,6 +1132,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     online,
     readAudio,
     emit,
+    deliverEphemeral,
+    acknowledgeMediaAudio: nonce => local.mediaHost?.ackLegacyAudio(nonce),
+    validateDelivery,
+    validateDeliverySync,
+    finishDelivery,
+    invalidateTransient,
     purposeStateFile,
     roleInfo,
     ownerInfo,

@@ -12,6 +12,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
   if (!/^[a-f0-9]{64}$/.test(key)) throw new CapabilityError('KEY_UNAVAILABLE', '渠道身份密钥格式无效。');
   const contexts = new Map();
   const intents = new Map();
+  const toolDeliveries = new Map();
   const canonical = channel => ({ kind: channel.kind, account: String(channel.account || ''), peer: String(channel.peer || ''), principal: channel.kind === 'qq-private' ? String(channel.peer) : String(channel.principal || channel.peer || 'public') });
   function checkIntentExpiry(intent) {
     if (Date.now() >= intent.expires) throw new CapabilityError('COMPANION_STOPPED', '主动轮次已过期。', '重新预览并发起新的轮次。');
@@ -37,8 +38,19 @@ export function createChannelHandler({ capabilities, keyFile }) {
       if (!channel || !['qq-private','qq-group','bili'].includes(channel.kind) || (channel.kind !== 'bili' && (!/^\d{1,20}$/.test(String(channel.account)) || !/^\d{1,20}$/.test(String(channel.peer))))) throw new CapabilityError('BINDING_INVALID', '渠道身份未验证。');
       // principal comes from authenticated private peer; groups never become owner.
       const trusted = canonical(channel);
-      let result, checkedIntent;
-      if (data.action === 'intent.claim') {
+      let result, checkedIntent, checkedTool;
+      if (data.action === 'tool.delivery.claim') {
+        const delivery = toolDeliveries.get(data.deliveryId);
+        if (!delivery || delivery.state !== 'issued' || delivery.channel !== JSON.stringify(trusted) || Date.now() >= delivery.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据无效、已使用或已过期。');
+        delivery.state = 'claimed';
+        await delivery.envelope.guard();
+        if (Date.now() >= delivery.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据已过期。');
+        const handle = crypto.randomBytes(24).toString('hex');
+        if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
+        contexts.set(handle, { context: delivery.envelope.context, channel: delivery.channel, expires: delivery.expires, toolDelivery: delivery });
+        result = { context: handle, text: delivery.text, expiresAt: delivery.expires };
+        delivery.text = ''; checkedTool = delivery;
+      } else if (data.action === 'intent.claim') {
         const intent = intents.get(data.intentId);
         if (!intent || intent.status !== 'issued' || JSON.stringify(intent.channel) !== JSON.stringify(trusted)) throw new CapabilityError('COMPANION_INTENT_INVALID', '主动投递凭据无效或已使用。', '本轮不会重放；请检查主动陪伴状态。');
         // Synchronous consume before awaiting: even concurrent bridge requests get one claim.
@@ -50,25 +62,44 @@ export function createChannelHandler({ capabilities, keyFile }) {
         contexts.set(handle, { context: intent.ownerContext, channel: JSON.stringify(trusted), expires: intent.expires, intent });
         result = { context: handle, text: intent.text, outreachId: intent.outreachId, expiresAt: intent.expires };
       } else if (data.action === 'context' || data.action === 'turn.begin') {
+        let toolInput;
+        if (data.action === 'turn.begin' && data.eventId !== undefined && capabilities.toolHost) {
+          await capabilities.binding(trusted);
+          toolInput = capabilities.toolHost.input(trusted, { eventId: data.eventId, text: data.text });
+        }
         const writerTurn = data.action === 'turn.begin' ? { lease: await capabilities.beginTurn?.(trusted) } : null;
         let context;
         try { context = await capabilities.context(trusted, String(data.query || '').slice(0, 2000)); }
         catch (error) { capabilities.endTurn?.(writerTurn?.lease); throw error; }
         const handle = crypto.randomBytes(24).toString('hex');
         if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
-        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn });
+        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn, toolInput });
         result = { context: handle, text: context.text, memory_epoch: context.memory_epoch, character_epoch: context.binding.character_epoch };
       } else {
         const stored = contexts.get(data.context);
-        if (!stored || stored.channel !== JSON.stringify(trusted) || (stored.expires < Date.now() && !['attention.finalize', 'intent.finish', 'turn.end'].includes(data.action))) throw new CapabilityError('BINDING_INVALID', '渠道上下文已失效。', '重新建立本会话上下文。');
+        if (!stored || stored.channel !== JSON.stringify(trusted) || (stored.expires < Date.now() && !['attention.finalize', 'intent.finish', 'tool.delivery.finish', 'turn.end'].includes(data.action))) throw new CapabilityError('BINDING_INVALID', '渠道上下文已失效。', '重新建立本会话上下文。');
+        if (stored.toolDelivery && !['validate', 'tool.delivery.finish'].includes(data.action)) throw new CapabilityError('PERMISSION_DENIED', '工具投递只能验证和结算原内容。');
         // Finalization releases no content; retain the original binding even after stop/correction.
         // Python still verifies reservation ownership and character epoch.
-        if (!['attention.finalize', 'intent.finish', 'turn.end'].includes(data.action)) {
+        if (!['attention.finalize', 'intent.finish', 'tool.delivery.finish', 'turn.end', 'sources.validate'].includes(data.action)) {
           if (stored.intent) { await validateIntent(stored.intent); checkedIntent = stored.intent; }
+          if (stored.toolDelivery) { await stored.toolDelivery.envelope.guard(); checkedTool = stored.toolDelivery; }
           await capabilities.validate(stored.context);
         }
         if (stored.intent && (!['validate', 'attention.check', 'attention.reserve', 'attention.finalize', 'intent.finish'].includes(data.action) || (data.action.startsWith('attention.') && data.params?.outreach_id !== stored.intent.outreachId))) throw new CapabilityError('PERMISSION_DENIED', '主动凭据仅可核查及结算原有投递，不能更改材料或事件。');
-        if (data.action === 'turn.end') {
+        if (data.action === 'tool.delivery.finish') {
+          if (!stored.toolDelivery || !['sent', 'failed', 'unknown'].includes(data.outcome)) throw new CapabilityError('PERMISSION_DENIED', '工具投递收据无效。');
+          if (stored.toolDelivery.state === 'claimed') stored.toolDelivery.state = data.outcome;
+          stored.toolDelivery.envelope.text = '';
+          result = { outcome: stored.toolDelivery.state };
+        } else if (data.action === 'tool.handle') {
+          if (!stored.toolInput || !capabilities.toolHost || typeof handler.deliverTool !== 'function') throw new CapabilityError('TOOL_HOST_UNAVAILABLE', '原生工具宿主尚未接好。');
+          result = await capabilities.toolHost.handle(stored.toolInput, { deliver: envelope => handler.deliverTool(envelope) });
+        } else if (data.action === 'sources.validate') {
+          if (stored.intent || !stored.neverPersisted) throw new CapabilityError('PERMISSION_DENIED', '只可核验已登记且明确未持久化的入站来源。');
+          await capabilities.validateSourceContext(stored.context);
+          result = { valid: true };
+        } else if (data.action === 'turn.end') {
           capabilities.endTurn?.(stored.writerTurn?.lease);
           if (stored.writerTurn) stored.writerTurn.lease = null;
           result = { released: true };
@@ -87,10 +118,17 @@ export function createChannelHandler({ capabilities, keyFile }) {
           contexts.set(handle, { context: { ...stored.context, memory_epoch: projection.memory_epoch }, channel: stored.channel, expires: Date.now() + 30 * 60000, writerTurn: stored.writerTurn });
           result = { ...projection, context: handle };
         }
+        else if (data.action === 'context.refine') {
+          const refined = await capabilities.refineContext(stored.context, String(data.query || ''));
+          if (refined.memory_epoch !== stored.context.memory_epoch) throw new CapabilityError('STALE_CONTEXT', '语义检索不能更新原回合代次。');
+          stored.context = refined;
+          result = { context: data.context, text: refined.text, memory_epoch: refined.memory_epoch, retrieval: refined.retrieval };
+        }
         else if (data.action === 'validate') result = { valid: true };
         else if (data.action === 'ingest') {
           result = await capabilities.ingest(stored.context, String(data.eventId || ''), String(data.text || ''), { actor: trusted.kind.startsWith('qq-') ? 'user' : 'external' });
           stored.context.memory_epoch = result.memory_epoch;
+          stored.neverPersisted = result.stored === false && result.skipped === true;
         } else if (['attention.check','attention.reserve','attention.finalize','attention.respond'].includes(data.action)) {
           if (stored.intent && !['attention.check', 'attention.reserve', 'attention.finalize'].includes(data.action)) throw new CapabilityError('PERMISSION_DENIED', '主动凭据不能代替主人回复。');
           result = await capabilities.supervisor.raw(data.action, stored.context.binding, { ...(data.params || {}), memory_epoch: stored.context.memory_epoch });
@@ -100,6 +138,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
       // IPC/ledger work can outlive the validity check; expiry also gates the response.
       // Finalization intentionally has no checkedIntent and remains available after expiry.
       if (checkedIntent) checkIntentExpiry(checkedIntent);
+      if (checkedTool) { checkedTool.envelope.syncGuard(); if (Date.now() >= checkedTool.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据已过期。'); }
       send(200, { ok: true, result });
     } catch (e) { send(e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
   };
@@ -114,5 +153,13 @@ export function createChannelHandler({ capabilities, keyFile }) {
     return intentId;
   };
   handler.intentStatus = id => intents.get(id)?.status || 'missing';
+  handler.issueToolDelivery = envelope => {
+    if (!envelope || envelope.channel?.kind !== 'qq-private' || envelope.memory_write !== false || typeof envelope.guard !== 'function' || typeof envelope.syncGuard !== 'function' || typeof envelope.text !== 'string' || Array.from(envelope.text).length > 6000 || !Number.isFinite(envelope.expiresAt) || envelope.expiresAt <= Date.now()) throw new CapabilityError('INVALID_REQUEST', '工具投递材料无效。');
+    for (const [id, item] of toolDeliveries) if (item.expires <= Date.now()) toolDeliveries.delete(id);
+    if (toolDeliveries.size >= 64) throw new CapabilityError('TOOL_HOST_BUSY', '工具投递记录已满。');
+    const deliveryId = crypto.randomBytes(24).toString('hex');
+    toolDeliveries.set(deliveryId, { envelope, text: envelope.text, channel: JSON.stringify(canonical(envelope.channel)), expires: envelope.expiresAt, state: 'issued' });
+    return deliveryId;
+  };
   return handler;
 }

@@ -18,6 +18,7 @@
  *   · 切换角色 = epoch +1；旧 epoch 的任务不许再向平台发消息（调用方用 `isCurrentEpoch`）。
  */
 import fs from 'node:fs';
+import { assertTargetReady, isTargetBlocked } from './role-package-gate.js';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -249,7 +250,7 @@ export function readCurrentCharacter() {
     currentCache = { key, value: null };
     return null;
   }
-  if (currentCache.key === key) return currentCache.value;
+  if (currentCache.key === key) return currentCache.value ? { ...currentCache.value, packagePaused: isTargetBlocked(currentCache.value.id, CHARACTERS_DIR) } : null;
   const raw = readJson(CURRENT_FILE, null);
   if (!raw || !isValidCharacterId(raw.id) || !fs.existsSync(characterDir(raw.id))) {
     currentCache = { key, value: null };
@@ -264,16 +265,17 @@ export function readCurrentCharacter() {
     switchedAt: String(raw.switchedAt ?? ''),
   };
   currentCache = { key, value };
-  return value;
+  return { ...value, packagePaused: isTargetBlocked(value.id, CHARACTERS_DIR) };
 }
 
 export function isCurrentEpoch(epoch) {
   const cur = readCurrentCharacter();
-  return Boolean(cur) && Number(epoch) === cur.epoch;
+  return Boolean(cur) && !cur.packagePaused && Number(epoch) === cur.epoch;
 }
 
 /** 让当前角色 epoch +1（回档/导入后让旧任务失效）。 */
 export function bumpEpoch(id) {
+  assertTargetReady(id, CHARACTERS_DIR);
   const cur = readCurrentCharacter();
   if (!cur || cur.id !== id) return cur;
   const nextEpoch = (Number(cur.epoch) || 0) + 1;
@@ -426,6 +428,7 @@ export function createCharacter({ name, personaText, memoryCard, fullRecords, id
 }
 
 export function updateCharacter(id, { name, personaText, memoryCard, now = Date.now() } = {}) {
+  assertTargetReady(id, CHARACTERS_DIR);
   const paths = characterPaths(id);
   const manifest = readManifest(id);
   if (!manifest) throw new Error(`角色不存在：${id}`);
@@ -457,6 +460,7 @@ export function touchCharacter(id, now = Date.now()) {
 
 /** 写当前角色指针 + epoch。调用方负责先停平台进程/存旧档。 */
 export function switchCharacter(id, { now = Date.now() } = {}) {
+  assertTargetReady(id, CHARACTERS_DIR);
   const paths = characterPaths(id);
   const manifest = readManifest(id);
   if (!manifest) throw new Error(`角色不存在：${id}`);
@@ -580,6 +584,7 @@ export function removeSnapshot(id, slot) {
 
 /** 删除角色（不可逆操作 → 只移不删）：整个目录移进 backups/deleted-character-*，并从索引移除。 */
 export function archiveCharacter(id, { now = Date.now() } = {}) {
+  assertTargetReady(id, CHARACTERS_DIR);
   const cur = readCurrentCharacter();
   if (cur && cur.id === id) throw new Error('不能删除当前角色；先加载别的角色');
   const paths = characterPaths(id);
@@ -602,6 +607,7 @@ export function archiveCharacter(id, { now = Date.now() } = {}) {
 /** 回档：先给当前状态拍一份 `pre-restore-*`，再覆盖人格卡 + 衰减记忆 + B站 行为账本。
  *  全量记忆卡是 append-only，不截断（避免回档把后来真实发生过的记忆删掉）。 */
 export function restoreSnapshot(id, slot, { now = Date.now() } = {}) {
+  assertTargetReady(id, CHARACTERS_DIR);
   const paths = characterPaths(id);
   const source = path.join(paths.snapshotsDir, String(slot ?? ''));
   if (!slot || !source.startsWith(paths.snapshotsDir) || !fs.existsSync(path.join(source, 'snapshot.json'))) {

@@ -147,8 +147,9 @@ try {
     await assert.rejects(adapter.send(event.key, async () => {}), e => ['STALE_CHARACTER', 'BINDING_INVALID'].includes(e.code));
   });
   await check('real bridge prompts omit old memory and use fresh DSH sessions', async () => {
+    const outgoing = [];
     class FixtureBridge extends LocalChannelBridge {
-      constructor(options) { super({ ...options, config, keyFile, guarded: () => true, mode: () => 'local' }); }
+      constructor(options) { super({ ...options, config, keyFile, guarded: () => true, mode: () => 'local', fetchImpl: async (url, init) => { if (String(url).startsWith(base)) return fetch(url, init); outgoing.push(JSON.parse(init.body)); return new Response(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1 } })); } }); }
     }
     h = await bridgeHarness({ config: { sendDelayMs: 0 }, globals: { LocalChannelBridge: FixtureBridge, localBackendGuarded: () => true, localBackendMode: () => 'local', safeFetchBuffer: async () => ({ buffer: Buffer.from('fixture-image') }) } });
     h.setMode('chat');
@@ -166,8 +167,8 @@ try {
     assert.notEqual(h.state.sessions[event.key], old);
     assert.ok(h.calls.archived.includes(old));
     h.localChannels.enterSession(h.state.sessions[event.key]);
-    await h.sendToQQ(event.key, '通过实际 SDK 出站封装');
-    assert.equal(h.calls.sent.length, 1);
+    await h.sendToQQ(event.key, '通过本地受控 HTTP 出站封装');
+    assert.equal(outgoing.length, 1); assert.equal(outgoing[0].user_id, 123);
     h.setMode('closed-agent');
     await assert.rejects(h.ensureSession(event.key), e => e.code === 'UNSCOPED_TOOLS_DISABLED' && !!e.hint);
   });

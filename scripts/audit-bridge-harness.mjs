@@ -195,6 +195,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
     localChannels, pumpMux, ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
+    activeWaits, pendingWakeKeys, pendingWakeOwners,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     fishChatWindows, evaluateConversationFishGuard, fishGuardSendBlock, recordFishWindow,

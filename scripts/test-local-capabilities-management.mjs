@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { CapabilitySupervisor } from '../plugins/surfcore/lib/local-capabilities/supervisor.js';
+import { CapabilitySupervisor, CapabilityError } from '../plugins/surfcore/lib/local-capabilities/supervisor.js';
 import { LocalCapabilities } from '../plugins/surfcore/lib/local-capabilities/facade.js';
 import { createManagementHandler } from '../plugins/surfcore/lib/local-capabilities/management.js';
 import { isLoopbackReq, json, sameOrigin } from '../plugins/surfcore/lib/http-guard.js';
@@ -36,7 +36,7 @@ async function fixture(name) {
     ctx: { webServer: { register({ path, handler }) { routes.set(path, handler); return () => {}; } },
       get: () => ({ requestRejection: req => req.headers['x-test-dsh-session'] === 'synthetic-host-session' ? false : 401 }) },
   });
-  for (const suffix of ['', '/api', '/backup/import', '/backup/download']) route('exact', mount + suffix, handler);
+  for (const suffix of ['', '/tools', '/semantic', '/api', '/backup/import', '/backup/download']) route('exact', mount + suffix, handler);
   const server = http.createServer((req, res) => {
     const handler = routes.get(new URL(req.url, 'http://127.0.0.1').pathname);
     if (handler) void handler(req, res); else { res.statusCode = 404; res.end(); }
@@ -56,6 +56,69 @@ async function fixture(name) {
 
 try {
   const a = await fixture('source'), b = await fixture('target');
+  await check('semantic page and management operations retain real host authentication and scoped binding', async () => {
+    const url = a.base + '/dsh-surfcore/local-capabilities/semantic';
+    assert.equal((await fetch(url)).status, 401);
+    const response = await fetch(url, { headers: { 'x-test-dsh-session': 'synthetic-host-session' } });
+    assert.equal(response.status, 200); const html = await response.text();
+    assert.match(html, /mountSemanticManagement/); assert.doesNotMatch(html, /__SEMANTIC_CLIENT__|__API_BASE__|__SESSION_TOKEN__/);
+    assert.match(a.html, /\/semantic/);
+    const token = html.match(/token:'([a-f0-9]+)'/)[1];
+    const override = { cookie: response.headers.get('set-cookie').split(';')[0], 'x-surfcore-session': token };
+    const request = async (op, params = {}) => (await a.post('/api', { op, params }, 'application/json', override)).json();
+    assert.equal((await request('memory.semantic.status')).result.enabled, false);
+    assert.equal((await request('memory.semantic.configure', { enabled: true })).ok, true);
+    const empty = await request('memory.semantic.query.start', { query: '', audience: 'session' });
+    assert.equal(empty.result.state, 'succeeded'); assert.equal(empty.result.search_mode, 'recent');
+    assert.equal((await request('memory.semantic.job.status', { job_id: empty.result.job_id })).ok, true);
+    assert.equal((await a.post('/api', { op: 'memory.semantic.configure', params: { enabled: false } }, 'application/json', { ...override, origin: 'https://foreign.invalid' })).status, 403);
+    assert.equal((await request('memory.semantic.configure', { enabled: false })).ok, true);
+    const ctx = await a.local.context({ kind: 'pet' }, 'disabled semantic query');
+    assert.equal(ctx.retrieval.reason, 'semantic_disabled');
+  });
+  await check('tools page uses the host session and an independent management session', async () => {
+    const url = a.base + '/dsh-surfcore/local-capabilities/tools';
+    assert.equal((await fetch(url)).status, 401);
+    const response = await fetch(url, { headers: { 'x-test-dsh-session': 'synthetic-host-session' } });
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /mountToolsManagement/);
+    assert.match(html, /本机工具与权限/);
+    assert.doesNotMatch(html, /__TOOLS_CLIENT__|__API_BASE__|__SESSION_TOKEN__/);
+    const token = html.match(/token:'([a-f0-9]+)'/)[1];
+    assert.notEqual(token, a.headers['x-surfcore-session']);
+    const reply = await a.post('/api', { op: 'tool.catalog' }, 'application/json', {
+      cookie: response.headers.get('set-cookie').split(';')[0], 'x-surfcore-session': token,
+    });
+    assert.equal(reply.status, 200);
+    assert.equal((await reply.json()).ok, true);
+  });
+  await check('browser cannot invoke trusted tool preparation execution or export delivery', async () => {
+    for (const op of ['tool.propose', 'tool.execute', 'tool.destinations.register', 'tool.destinations.revoke',
+      'tool.result.export.prepare', 'tool.result.export.consume', 'tool.result.export.validate', 'tool.result.export.finalize']) {
+      const result = await a.call(op, {});
+      assert.equal(result.ok, false, op);
+      assert.equal(result.code, 'PERMISSION_DENIED', op);
+      assert.ok(result.error && result.hint, op);
+    }
+  });
+  await check('writer UI reports unavailable configuration and keeps actions on the host queue', async () => {
+    const missing = await a.call('writer.status');
+    assert.equal(missing.code, 'SERVICE_UNAVAILABLE'); assert.ok(missing.error && missing.hint);
+    const calls = [];
+    a.local.semanticWriter = { status: () => ({ configured: true, queued: 1, foreground: 1 }),
+      flush: async scope => { calls.push(scope); throw new CapabilityError('WRITER_FOREGROUND_BUSY', '普通聊天进行中。', '等待聊天完成。'); } };
+    try {
+      assert.equal((await a.call('writer.status')).result.queued, 1);
+      assert.equal((await a.call('writer.run', { text: 'not-an-episode' })).code, 'INVALID_REQUEST');
+      assert.equal((await a.call('writer.run', { scopeId: '../foreign' })).code, 'INVALID_REQUEST');
+      assert.equal((await a.post('/api', { op: 'writer.run' }, 'application/json', { 'x-surfcore-session': 'wrong' })).status, 403);
+      assert.equal(calls.length, 0);
+      const busy = await a.call('writer.run');
+      assert.equal(busy.code, 'WRITER_FOREGROUND_BUSY'); assert.ok(busy.error && busy.hint);
+      assert.deepEqual(calls, [null]);
+    } finally { a.local.semanticWriter = null; }
+  });
   const c = await a.local.context({ kind: 'pet' });
   await a.local.ingest(c, 'synthetic-episode', '只供隔离管理测试的蓝色风筝');
   const created = await a.call('backup.create', { password: secret });

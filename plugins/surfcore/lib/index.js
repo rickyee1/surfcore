@@ -15,11 +15,13 @@
  *   · 读配置脱敏（********），保存时 ******** 表示保持原值；
  *   · 每次写文件前备份到 ~/.dsh/surfcore/backups/。
  */
+import { captureTargetGate, assertTargetGate } from '../../../src/role-package-gate.js';
 import { LOCAL_ROOT } from '../../../src/local-capabilities-state.js';
 import { createChannelHandler } from './local-capabilities/channel.js';
-import { localCapabilities, configureSemanticWriter, disposeLocalCapabilities } from './local-capabilities/host.js';
+import { localCapabilities, configureSemanticWriter, configureToolHost, configureMediaHost, disposeLocalCapabilities } from './local-capabilities/host.js';
 import { createManagementHandler } from './local-capabilities/management.js';
 import { createWriterHandler } from './local-capabilities/semantic-writer.js';
+import { createToolBridgeDelivery } from './local-capabilities/tool-host.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -369,6 +371,7 @@ export function apply(ctx) {
   // 抽成函数给「一键启动」复用：DSH 重启后插件加载时按平台开关决定是否自动启动，
   // 失败后也能手动拉起。
   function startSchedulerNow() {
+    if (readCurrentCharacter()?.packagePaused) { schedulerStatus = { ...idleSchedulerStatus('role-package-paused'), lastError: '角色包恢复尚未复审，自动启动已暂停。' }; return schedulerStatus; }
     if (scheduler && schedulerStatus.running) return schedulerStatus;
     if (!platformStartEnabled('bili')) {
       schedulerStatus = idleSchedulerStatus('disabled');
@@ -656,6 +659,7 @@ export function apply(ctx) {
     bridgeRepairBusy = true;
     try {
       if (process.env.SURFCORE_SKIP_AUTOSTART === '1') return;
+      const packageGate = captureTargetGate(readCurrentCharacter());
       // 新开关是唯一真相；旧 bridge.autoStart 已由 readUnified() 迁移，不再直接读。
       if (!platformStartEnabled('qq')) return;
       const status = await bridgeStatus();
@@ -663,12 +667,14 @@ export function apply(ctx) {
         const stale = bridgeStaleReason(status);
         if (stale) {
           pluginLog(`autoStartBridge：${stale}，自动重启`);
+          assertTargetGate(packageGate, readCurrentCharacter());
           const restarted = await restartBridge({ dshWebUrl: currentDshUrl() });
           pluginLog('autoStartBridge 重启结果：', restarted.message || restarted.error || '');
         }
         return;
       }
       pluginLog('autoStartBridge：桥接未运行，尝试启动');
+      assertTargetGate(packageGate, readCurrentCharacter());
       const result = await startBridge({ dshWebUrl: currentDshUrl() });
       pluginLog('autoStartBridge 结果：', result.message || result.error || '');
     } catch (error) {
@@ -687,7 +693,7 @@ export function apply(ctx) {
         if (!isLoopbackReq(req)) { json(res, 403, { ok: false, error: '只接受本机回环访问' }); return; }
         if (req.method !== 'GET' && !sameOrigin(req)) { json(res, 403, { ok: false, error: '跨站请求被拒绝' }); return; }
         const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
-        const encryptedImport = kind === 'exact' && pathname === '/dsh-surfcore/local-capabilities/backup/import';
+        const encryptedImport = kind === 'exact' && ['/dsh-surfcore/local-capabilities/backup/import', '/dsh-surfcore/local-capabilities/role-package/upload'].includes(pathname);
         if (req.method !== 'GET' && contentType !== 'application/json' && !(encryptedImport && contentType === 'application/octet-stream')) {
           json(res, 415, { ok: false, code: 'INVALID_REQUEST', error: '写操作的内容类型无效。', hint: encryptedImport ? '请从本地记忆页面选择加密备份文件。' : '请使用 application/json 请求。' });
           return;
@@ -712,22 +718,39 @@ export function apply(ctx) {
   }
 
   const local = localCapabilities();
+  let companion;
+  configureToolHost({ ctx, tokenBudget, onInvalidate: () => {
+    local.mediaHost?.invalidate('HOST_INVALIDATED');
+    local.semanticWriter?.cancel();
+    petChat.invalidateTransient?.();
+    companion?.cancelPending?.();
+    if (local.guarded) void callBridge('/api/tools/invalidate', { method: 'POST', body: {}, timeoutMs: 5000 }).catch(() => {});
+  } });
+  const mediaHost = configureMediaHost({ ctx, tokenBudget, deliver: envelope => petChat.deliverEphemeral(envelope), onOutputPreference: value => petChat.emit({ type: 'media-output', ...value }), persona: () => [readPersonaLayerText('core'), readPersonaLayerText('tone')].filter(Boolean).join('\n') });
+  void mediaHost.initialize().catch(() => {}); // Errors remain visible in media status; unknown policy suppresses legacy audio.
   const semanticWriter = configureSemanticWriter({ ctx, tokenBudget });
   const writerHandler = createWriterHandler(semanticWriter);
   route('exact', `${API_PREFIX}/local-capabilities/writer/status`, writerHandler);
   route('exact', `${API_PREFIX}/local-capabilities/writer/run`, writerHandler);
   const localChannel = createChannelHandler({ capabilities: local, keyFile: path.join(LOCAL_ROOT, 'channel.key') });
+  localChannel.deliverTool = createToolBridgeDelivery({ channelHandler: localChannel, callBridge });
   const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
   route('exact', '/dsh-surfcore/local-capabilities', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/tools', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/semantic', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/media', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/api', localManagement);
   // T2a mount only: management owns backup method/session/Origin validation.
   route('exact', '/dsh-surfcore/local-capabilities/backup/import', localManagement);
   route('exact', '/dsh-surfcore/local-capabilities/backup/download', localManagement);
+  // T5 mounts only, supplied by tools_ui/root; management owns transfer authority.
+  route('exact', '/dsh-surfcore/local-capabilities/role-package', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/role-package/upload', localManagement);
+  route('exact', '/dsh-surfcore/local-capabilities/role-package/download', localManagement);
   const biliDraftHandler = createBiliDraftHandler(createBiliDrafts({ ctx }));
   route('exact', `${API_PREFIX}/bili/drafts/read`, biliDraftHandler);
   route('exact', `${API_PREFIX}/bili/drafts/generate`, biliDraftHandler);
-  const companion = createAutonomousCompanion({
+  companion = createAutonomousCompanion({
     ctx, capabilities: local, channelHandler: localChannel, stateDir: path.join(LOCAL_ROOT, 'companion'), callBridge, tokenBudget,
     environment: () => ({ roleActive: readJson(path.join(QQ_STATE_DIR(), 'current-role.json'), { mode: 'active' })?.mode === 'active', focused: petChat.focusEnabled(), paused: false, platformEnabled: readUnified().config?.platforms?.start?.qq === true }),
     persona: () => [readPersonaLayerText('core'), readPersonaLayerText('tone')].filter(Boolean).join('\n'),
@@ -2333,6 +2356,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
       if (suffix === '/remove') { json(res, 200, await petService.remove()); return; }
       if (suffix === '/clean') { json(res, 200, await petService.cleanAppDir()); return; }
       if (suffix === '/start') {
+        captureTargetGate(readCurrentCharacter());
         // 启动同样接受表单里的 electronPath：用户刚填的路径不该先"保存"才生效。
         if (typeof body?.electronPath === 'string' && body.electronPath.trim()) {
           try { petService.configure({ electronPath: body.electronPath.trim() }); } catch {}
@@ -2345,6 +2369,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
         // 给设置页「发一条测试消息」用：不占主动搭话，只验证人设/模型/语音链路。
         const result = await petChat.chat({ text: body.text || '在吗', modality: body.modality === 'voice' ? 'voice' : 'text' });
         // 设置页发的测试也要在桌宠那边弹出来（气泡 + 对话框），否则用户不知道有没有通。
+        await petChat.validateDelivery(result); petChat.validateDeliverySync(result);
         if (result.ok && result.reply) {
           petChat.emit({
             type: 'reply',
@@ -2352,14 +2377,15 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
             modality: result.reply.modality,
             audioKey: result.reply.audio?.key || '',
             messageId: result.reply.id,
+            memory_write: result.memory_write,
           });
         }
-        json(res, result.ok ? 200 : 400, result);
+        await petApi.sendChatResult(res, result.ok ? 200 : 400, result);
         return;
       }
       json(res, 404, { ok: false, error: `未知桌宠接口：${suffix}` });
     } catch (error) {
-      json(res, 400, { ok: false, error: String(error?.message ?? error) });
+      json(res, 400, { ok: false, error: String(error?.message ?? error), ...(['ROLE_PACKAGE_PAUSED', 'STALE_CHARACTER'].includes(error?.code) ? { code: error.code, hint: error.hint || '打开本机角色包页面检查状态并复审。' } : {}) });
     }
   }
 
@@ -2474,7 +2500,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
         // 设置页测一句话（不占主动搭话额度）。
         const body = JSON.parse((await readBody(req)) || '{}');
         const result = await petChat.chat({ text: body.text || '在吗', modality: body.modality === 'voice' ? 'voice' : 'text' });
-        json(res, result.ok ? 200 : 400, result);
+        await petApi.sendChatResult(res, result.ok ? 200 : 400, result);
         return;
       }
       json(res, 404, { ok: false, error: `未知目的接口：${suffix}` });

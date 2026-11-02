@@ -59,7 +59,7 @@ async function fixture(overrides = {}) {
     const intercepted = await interceptor?.(request); if (intercepted) return intercepted;
     let result;
     switch (request.op) {
-      case 'status': result = { character: state.character }; break;
+      case 'status': result = { character: state.character, toolHost: state.toolHost }; break;
       case 'tool.emergency.status': result = state.emergency; break;
       case 'tool.catalog': result = { tools: state.tools }; break;
       case 'tool.subjects': result = { subjects: state.subjects }; break;
@@ -97,6 +97,13 @@ await check('actual mount renders tool/lock/role status and complete source iden
   assert.match(f.el('subject').textContent, /qq \/ account-A \/ private-peer-A \/ owner:local \/ owner:local/);
   assert.match(f.el('executions').textContent, /test.txt/); assert.match(f.el('executions').textContent, /1.0.0/);
   assert.equal(f.calls('tool.result.read').length, 0); f.app.dispose();
+});
+await check('trusted host closure pending count and asynchronous delivery failures are visible', async () => {
+  const f = await fixture({ toolHost: { closed: true, pending: 2, lastError: { code: 'MODEL_CANCELLED', error: '固定模型已取消。', hint: '核对记录后重新发起。' } } });
+  assert.match(f.el('hostStatus').textContent, /已停止.*2 项/); assert.equal(f.el('hostError').hidden, false);
+  assert.match(f.el('hostError').textContent, /MODEL_CANCELLED.*\n下一步：核对/);
+  f.state.toolHost = { closed: false, pending: 0, lastError: null }; await f.app.refresh();
+  assert.match(f.el('hostStatus').textContent, /可用.*0 项/); assert.equal(f.el('hostError').hidden, true); f.app.dispose();
 });
 await check('execution confirmation requires explicit review checkbox and exact frozen fields', async () => {
   const f = await fixture(); await f.click('review-exec-1'); assert.equal(f.el('confirmExecution').disabled, true);

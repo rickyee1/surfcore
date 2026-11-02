@@ -18,4 +18,6 @@ T2a 提供了来源提案、索引、加密快照和恢复协议，但管理页�
 
 ## 发布交接
 
+第二批接线增加同一已鉴权页面的 `/tools` 入口，浏览器操作白名单独立于宿主，明确拒绝工具提案/执行、目的地登记、导出准备/消费/校验/结算。语义整理状态和“现在整理”只转发已存在的宿主队列，参数仅可含已有 `scopeId`，不能提交正文或权限；缺整理器和前台聊天占用都显示结构化错误。主会话负责这段局部集成，工具页面主体由执行者交付并独立验收。实际外层DSH wrapper、HTTP和隔离SQLCipher检查现为15项通过，包括工具页双重会话鉴权、host-only调用拒绝、整理器缺失/占用/非法字段；证据 `.local/evidence/full-integration/t3u-mount-management.log`。新真实浏览器工具验收记录在 `.local/evidence/t3u/attempt3-root-ui-evidence.json`。Writer真实模型与工具聊天交付仍单独验收；本管理页测试没有调用模型。第二批覆盖前备份在 `.local/backups/t3u-mount-attempt1/`、`.local/backups/writer-ui-mount-attempt1/`。
+
 不改版本、tag或Release。受影响文件为本地管理HTML/handler/加密传输、facade.management 与 index.js exact route；新增管理测试需加入本地能力测试链。最终提交前运行 audit、协议回归与插件测试，并按 HEAD 生成/核对安装清单。真实数据升级与长时间观察证据由主会话补充。

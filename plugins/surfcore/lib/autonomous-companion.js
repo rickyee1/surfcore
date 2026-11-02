@@ -103,6 +103,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
   async function textModel(system, input, snapshot, label, max = 800) {
     assertActive(snapshot);
     if (tokenBudget?.block && (await tokenBudget.block('bili'))?.blocked) throw fail('TOKEN_BUDGET_BLOCKED', '今日模型预算已达到上限。', '等待额度恢复或在设置中调整预算。');
+    assertActive(snapshot);
     const target = ctx?.get('agentDefaultModel')?.currentSelection?.(); const llm = ctx?.get('llm');
     if (!target?.provider || !target.model || !llm?.stream) throw fail('MODEL_UNAVAILABLE', '默认模型不可用。', '在 DSH 设置中选择可用模型后重试。');
     const control = new AbortController(); const abort = () => control.abort();
@@ -237,7 +238,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
   async function tick() { try { if (!configRecord().config.enabled || capabilities.mode !== 'local') return; return await run({ automatic: true }); } catch (e) { const error = errorResult(e); if (lastError?.code !== error.code) log(`[companion] ${error.code}`); lastError = error; return error; } }
   function start() { if (!timer && !disposed) { timer = setInterval(() => { void tick(); }, 60000); timer.unref?.(); } }
   function dispose() { disposed = true; pending?.controller.abort(); if (timer) clearInterval(timer); timer = null; }
-  return { status, configure, preview, run, stop, tick, start, dispose };
+  return { status, configure, preview, run, stop, tick, start, dispose, cancelPending: () => pending?.controller.abort() };
 }
 
 /** Registered behind the normal plugin authentication/Origin fence. No text/target fields. */

@@ -1,5 +1,13 @@
 # 踩坑档案（PITFALLS）
 
+## 2026-11-02：终态与配置加载事务的边界
+
+语音包导入只有在清理/旧包恢复真正完成后才能发布失败终态；提前标“失败”会让 list 消费者读取不存在的目标，也允许新的导入与回滚竞争。用真实 rename 屏障复现并修复，见 [失败状态顺序 case](cases/2026-11-02-voice-import-failure-order.md)。
+
+隔离 DSH 测试插件不能在 apply 内 await `agentDefaultModel.saveSelection`：ConfigEditor 与 Loader 串行会等待当前加载结束，导致 ready 路由始终未注册。把选定模型写入启动前 profile patch，apply 只核对，不改模型；零模型真实启动 405→200 的证据见 [A01 case](cases/2026-11-02-a01-native-harness.md)。
+
+语义检索不能取新 epoch 来“修复”旧查询；必须绑定原始上下文并明确分页覆盖，超时/角色/来源变化取消。界面轮询也不能重建相同结果而覆盖用户的纠正草稿，见 [语义聊天与管理 case](cases/2026-11-02-semantic-chat-management.md)。
+
 ## 2026-11-02：本地记忆不能仅过滤最终提示词
 
 旧DSH历史、派生摘要和待发队列都可能绕过纠错/删除。新后端需要可信受众绑定、检索前过滤、派生失效、来源副本删除和实际发送复核。独立审查已用来源别名与多层派生反例定位残留；浏览器原生prompt不可用时改内联纠正表单。验证与剩余边界见[cases/2026-11-02-local-capabilities.md](cases/2026-11-02-local-capabilities.md)。

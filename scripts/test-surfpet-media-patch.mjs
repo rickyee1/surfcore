@@ -1,0 +1,25 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { patchPetMedia } from './patch-surfpet-media.mjs';
+const source = fs.readFileSync(path.resolve(process.argv[2] || '.local/evidence/t4-host-attempt1/surfpet-t3-base.js'), 'utf8');
+const patched = patchPetMedia(source); assert.throws(() => patchPetMedia(source + '\n'), /SURFPET_VERSION_MISMATCH/);
+const begin = patched.indexOf('var ChatHost = class {'); const end = patched.indexOf('\n};', begin) + 3; assert.ok(begin > 0 && end > begin);
+const posted = [], opened = [], callbacks = new Map(); let resolved = [], executed = [];
+class Client { info = { baseUrl: 'http://127.0.0.1:12345' }; isConnected = false; on(name, cb) { callbacks.set(name, cb); } async request(url, options) { posted.push({ url, ...options }); return { ok: true }; } }
+const ctx = { SurfCoreClient: Client, BUBBLE_W: 300, BUBBLE_MIN_H: 100, URL, nowMs: Date.now, import_electron: { shell: { openExternal: url => { opened.push(url); return Promise.resolve(); } } } };
+vm.runInNewContext(patched.slice(begin, end) + ';globalThis.Host=ChatHost;', ctx);
+const host = new ctx.Host({ log() {} }); host.broadcastDialog = () => {};
+const win = () => ({ isDestroyed: () => false, webContents: { send() {}, executeJavaScript(code) { assert.match(code, /__surfcoreSetPlaybackPermit/); executed.push(code); return new Promise(r => resolved.push(() => r(JSON.parse(code.match(/__surfcoreSetPlaybackPermit\((\{.*\})\);/)[1])))); } } });
+host.dialog = win(); host.bubble = win(); host.bubblePayload = { audio: { url: 'old' }, autoplay: true };
+const config = { voice: { mediaSuppressed: true, mediaSuppressionNonce: 'a'.repeat(48) } }; host.config = config;
+const task = host.applyMediaOutput(config); assert.equal(executed.length, 2); assert.equal(posted.length, 0); resolved[0](); await new Promise(r => setImmediate(r)); assert.equal(posted.length, 0); resolved[1](); await task;
+assert.equal(posted.length, 1); assert.equal(posted[0].url, '/media/audio-suppressed'); assert.equal(posted[0].method, 'POST'); assert.equal(posted[0].body.nonce, config.voice.mediaSuppressionNonce); assert.equal(host.bubblePayload.audio, undefined);
+assert.equal(host.withAbsoluteAudio({ text: 'old', audio: { url: 'old-url' } }).audio, undefined); assert.equal(host.withAbsoluteAudio({ text: 'media', suppressTts: true, audio: { url: 'forbidden' } }).audio, undefined);
+host.remember({ id: 'media-reply', text: 'synthetic approved reply', memory_write: false, suppressHistory: true }); assert.equal(host.messages.length, 0); assert.equal((await host.historyPayload()).messages.length, 0);
+resolved = []; const changed = host.applyMediaOutput(config); host.config = { voice: { mediaSuppressed: true, mediaSuppressionNonce: 'b'.repeat(48) } }; for (const r of resolved) r(); await changed; assert.equal(posted.length, 1);
+host.dialog.webContents.executeJavaScript = async () => { throw Error('synthetic renderer lost'); }; await assert.rejects(host.applyMediaOutput(host.config)); assert.equal(posted.length, 1);
+host.openMediaControls(); assert.deepEqual(opened, ['http://127.0.0.1:12345/dsh-surfcore/local-capabilities/media']); host.client.info.baseUrl = 'https://attacker.invalid'; host.openMediaControls(); assert.equal(opened.length, 1);
+assert.match(patched, /label: "本机语音与窗口（需明确授权）"/);
+console.log('PASS exact Surfpet dist patch: both renderers pause before ACK, stale/lost renderer no ACK, no-history/audio, fixed local menu only. Installed app unchanged.');

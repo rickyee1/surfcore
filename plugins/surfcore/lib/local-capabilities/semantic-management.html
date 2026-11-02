@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SurfCore · 本地语义检索</title>
+<style>body{font:16px system-ui;background:#101923;color:#e5edf6;max-width:1000px;margin:40px auto;padding:0 24px}button,input,select,textarea{font:inherit;padding:10px;border:1px solid #52657a;border-radius:6px;background:#1c2b3b;color:inherit;margin:5px;max-width:95%}button{cursor:pointer;background:#285b75}button:disabled{opacity:.5}section{border:1px solid #354858;border-radius:12px;padding:20px;margin:20px 0}p{line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}textarea{width:90%;min-height:100px}label{display:block}a{color:#99d3ee}[role=alert]{background:#602b35;padding:14px}.row{border-top:1px solid #354858;padding:12px 0}</style>
+<h1>本地语义检索</h1><nav><a href="__API_BASE__">本地记忆与备份</a> · <a href="__API_BASE__/tools">本机工具与权限</a></nav>
+<p>按意思查找已有记忆。固定使用本机 BGE 中文模型，查询和记忆文字不发送给外部模型。聊天收到的是当前受众允许使用的有限记忆。</p>
+<main id="semantic-root"></main>
+<script type="module">
+__SEMANTIC_CLIENT__
+mountSemanticManagement({document,root:document.getElementById('semantic-root'),base:'__API_BASE__',token:'__SESSION_TOKEN__'});
+</script></html>

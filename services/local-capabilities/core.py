@@ -60,6 +60,8 @@ class CapabilityService:
             self.semantic = SemanticIndex(self)
             from media_authority import MediaAuthority
             self.media = MediaAuthority(self)
+            from portable_state import PortableState
+            self.portable = PortableState(self)
             # A manually restored older main file must still obey the independent ledger.
             self.db.execute('BEGIN IMMEDIATE')
             victims = self.db.execute('SELECT DISTINCT f.character,f.memory FROM fingerprints f JOIN sovereignty.tombstones t ON t.character=f.character AND t.kind=f.kind AND t.digest=f.digest JOIN memories m ON m.id=f.memory WHERE m.status!=?', ('deleted',)).fetchall()
@@ -154,6 +156,7 @@ class CapabilityService:
 
     def authorize(self, request, binding=True):
         character = text(request.get("character_id"), 200)
+        self.portable.gate(character)
         if character not in self.active or request.get("character_epoch") != self.active[character]:
             raise ServiceError("STALE_CHARACTER", "角色代次已失效。", "重新激活当前角色并重建会话上下文。")
         if not binding:
@@ -170,10 +173,16 @@ class CapabilityService:
             raise ServiceError("PERMISSION_DENIED", "此操作仅允许本机主人管理页。", "打开本机记忆管理页面操作。")
 
     def dispatch(self, op, request, params):
+        # Private trusted stdio seam; never in browser management whitelist.
+        if op == "portable.coordinator.open":
+            return dict(coordinator_token=self.portable.token)
+        if op.startswith("portable."):
+            return self.portable.dispatch(op, request, params)
         if op in ("health", "capabilities"):
             return dict(protocol_version=1, status="ready", encrypted=True, modules=["memory", "attention", "memory_proposals", "keyword_index", "backup", "tools", "semantic_index", "media"], storage="SQLCipher")
         if op == "character.activate":
             character = text(params.get("character_id"), 200)
+            self.portable.gate(character)
             self.db.execute("INSERT OR IGNORE INTO characters(id) VALUES(?)", (character,))
             self.invalidate(character)
             epoch = uuid.uuid4().hex
@@ -567,12 +576,9 @@ class CapabilityService:
         owned = prior and prior["status"] == "reserved" and prior["binding"] == session["token"] and prior["epoch"] == session["epoch"] and params.get("reservation_id") == prior["reservation"]
         if prior and not owned:
             return "duplicate"
-        rows = self.db.execute("SELECT * FROM outreach WHERE character=? AND status IN ('reserved','sent','unknown')", (session["character"],)).fetchall()
-        others = [row for row in rows if not owned or row["id"] != prior["id"]]
-        if sum(row["day"] == now.date().isoformat() for row in others) >= max(0, int(config["daily_limit"] * state["intensity"])):
-            return "daily_budget"
-        if others and self.clock() - max(row["created"] for row in others) < config["cooldown_seconds"] / state["intensity"]:
-            return "cooldown"
+        portable_reason = self.portable.attention_reason(session, params["outreach_id"], config, state, owned)
+        if portable_reason:
+            return portable_reason
         if "memory_epoch" in params and params["memory_epoch"] != self.epoch(session["character"]):
             return "stale_context"
         return ""

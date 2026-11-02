@@ -161,7 +161,8 @@ try {
     await reset(); await local.setQqOwner({ account: '999', peer: '123' });
     const keyFile = path.join(temp, `channel-${seq}.key`); const channel = createChannelHandler({ capabilities: local, keyFile }); const server = http.createServer((req, res) => void channel(req, res));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const baseUrl = `http://127.0.0.1:${server.address().port}`;
-    class FixtureAdapter extends LocalChannelBridge { constructor(options) { super({ ...options, config: () => ({ ...options.config(), dsh: { baseUrl } }), keyFile, guarded: () => true, mode: () => local.mode }); } }
+    const qqOutgoing = [];
+    class FixtureAdapter extends LocalChannelBridge { constructor(options) { super({ ...options, config: () => ({ ...options.config(), dsh: { baseUrl } }), keyFile, guarded: () => true, mode: () => local.mode, fetchImpl: async (url, init) => { if (String(url).startsWith(baseUrl)) return fetch(url, init); qqOutgoing.push(JSON.parse(init.body)); return new Response(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1 } })); } }); } }
     const h = await bridgeHarness({ config: { sendDelayMs: 0, ownerQQ: '123', allow: { private: ['123'], groups: [] } }, globals: { LocalChannelBridge: FixtureAdapter, localBackendGuarded: () => true, localBackendMode: () => 'local', __auditMuxOnce: true } });
     try {
       h.setMode('chat'); const key = 'private:123'; await seed('我喜欢旧茶', { kind: 'qq-private', account: '999', peer: '123', principal: '123' }); let release; const gate = new Promise(resolve => { release = resolve; }); hook = async () => gate;
@@ -169,7 +170,7 @@ try {
       await h.localChannels.incoming(key, { self_id: 999, user_id: 123, message_id: 1 }, '我喜欢喝茶'); assert.equal((await background).code, 'WRITER_DEFERRED'); release(); await tick(); hook = null; calls.length = 0; await h.deliverPrompt(key, 'legacy prompt unused');
       assert.equal(writer.status().foreground, 1); await rejects(writer.flush(), 'WRITER_FOREGROUND_BUSY');
       const sessionId = h.state.sessions[key]; h.api.events.mux = async function* () { for (const event of [{ type: 'turn/start', data: { turn: 1 } }, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '实际QQ普通回复' }] } } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }]) yield { payload: { type: 'session/event', sessionId, event } }; };
-      await h.pumpMux(); assert.equal(h.calls.sent.length, 1); assert.equal(writer.status().foreground, 0); await writer.flush(); assert.equal(calls.length, 1);
+      await h.pumpMux(); assert.equal(qqOutgoing.length, 1); assert.equal(qqOutgoing[0].user_id, 123); assert.equal(writer.status().foreground, 0); await writer.flush(); assert.equal(calls.length, 1);
       await h.localChannels.incoming(key, { self_id: 999, user_id: 123, message_id: 2 }, '第二条用户原话'); const request = h.localChannels.request.bind(h.localChannels);
       h.localChannels.request = async (...args) => { if (args[0] === 'sources') throw channelError('STALE_CONTEXT', 'fixture source changed'); return request(...args); };
       await rejects(h.localChannels.prepare(key, 'failed-prepare', ''), 'STALE_CONTEXT'); assert.equal(writer.status().foreground, 0);

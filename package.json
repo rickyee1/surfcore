@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node src/bridge.js",
     "dev:local-memory": "node scripts/local-capabilities-dev.mjs",
-    "test:local-capabilities": "node scripts/test-local-capabilities-service.mjs && node scripts/test-local-capabilities-integration.mjs && node scripts/test-local-capabilities-integration-pet.mjs && node scripts/test-local-capabilities-channels.mjs && node scripts/test-local-capabilities-management.mjs",
+    "test:local-capabilities": "node scripts/test-local-capabilities-service.mjs && node scripts/test-local-capabilities-integration.mjs && node scripts/test-local-capabilities-integration-pet.mjs && node scripts/test-local-capabilities-channels.mjs && node scripts/test-local-capabilities-management.mjs && node scripts/test-local-capabilities-tools-ui.mjs && node scripts/test-local-capabilities-semantic-host.mjs && node scripts/test-local-capabilities-semantic-role.mjs && node scripts/test-local-capabilities-bridge-lifecycle.mjs && node scripts/test-reserved2-continuity.mjs && node scripts/test-role-package.mjs && node scripts/test-role-package-management.mjs && node scripts/test-role-package-native.mjs",
     "test:audit": "node scripts/test-audit.mjs",
     "test:token": "node scripts/test-token-economy.mjs && node scripts/test-reply-wait.mjs && node scripts/test-qq-model-view.mjs && node scripts/test-qq-preset-contract.mjs",
     "test:tokens": "node scripts/test-token-usage.mjs",

@@ -61,7 +61,8 @@ class Store:
                     raise ServiceError("KEY_UNAVAILABLE", "配置的数据库密钥格式不正确。")
                 key = bytes.fromhex(configured)
             elif keyfile.exists():
-                key = dpapi(keyfile.read_bytes(), False)
+                from schema_compat import unwrap
+                key, _minimum_reader = unwrap(dpapi(keyfile.read_bytes(), False))
             elif db.exists():
                 raise ServiceError("KEY_UNAVAILABLE", "已有数据库的密钥文件缺失。", "恢复原 key.dpapi；不会新建空库或明文库。")
             else:
@@ -89,9 +90,12 @@ class Store:
             if not self.conn.execute("PRAGMA cipher_version").fetchone():
                 raise ServiceError("SERVICE_UNAVAILABLE", "驱动未提供 SQLCipher。")
             self.conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            from schema_compat import prepare, finish
+            upgrade = prepare(self.conn, root, keyfile, key, configured is not None, dpapi)
             self.conn.execute("PRAGMA journal_mode=DELETE")
             self.conn.execute("PRAGMA secure_delete=ON")
             self.conn.executescript(SCHEMA)
+            finish(self.conn, root, upgrade)
             self._key = key
             # Independent append-only deletion authority is never replaced by restore.
             prior_lineage = self.conn.execute("SELECT value FROM store_metadata WHERE key='lineage'").fetchone()

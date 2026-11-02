@@ -69,6 +69,8 @@ export function mountToolsManagement({ document, root, base, token, fetch: fetch
   node('p', '只管理当前角色。身份由服务解析会话绑定，桌宠共享身份不等于 QQ 账号。', safety);
   node('p', '正在读取…', safety, { id: 'status', role: 'status' });
   node('p', '', safety, { id: 'faultStatus', role: 'status' });
+  node('p', '', safety, { id: 'hostStatus', role: 'status' });
+  node('p', '', safety, { id: 'hostError', role: 'alert', hidden: true });
   node('div', null, root, { id: 'error', role: 'alert', hidden: true });
   button(safety, '刷新 / 重试读取', 'refresh', () => refresh(true));
   button(safety, '总紧停：停止待执行与待发送', 'stop', async () => {
@@ -305,6 +307,10 @@ export function mountToolsManagement({ document, root, base, token, fetch: fetch
       const after = await call('status');
       if (disposed) return;
       if (role !== roleKey(after)) throw failure('STALE_CHARACTER', '读取期间角色或代次已切换，整批工具数据已丢弃。', '点击“刷新 / 重试读取”重新读取完整当前角色数据，再核对授权或确认。');
+      const host = after.toolHost;
+      ui.hostStatus.textContent = host ? `聊天交付：${host.closed ? '已停止' : '可用'} · 待处理 ${Number.isSafeInteger(host.pending) ? host.pending : 0} 项` : '当前服务没有连接聊天交付宿主。';
+      ui.hostError.hidden = !host?.lastError;
+      ui.hostError.textContent = host?.lastError ? `${host.lastError.code || 'TOOL_DELIVERY_FAILED'}：${host.lastError.error || '工具结果交付未完成。'}\n下一步：${host.lastError.hint || '核对执行与外发记录后重新发起；不自动重发旧结果。'}` : '';
       const [catalog, subjects, history, roots, grants, exports] = values;
       for (const list of [catalog.tools, subjects.subjects, history.executions, roots.roots, grants.grants, exports.exports])
         if (!Array.isArray(list)) throw failure('PROTOCOL_ERROR', '管理列表响应无效。', '检查服务版本后刷新页面。');
@@ -325,6 +331,7 @@ export function mountToolsManagement({ document, root, base, token, fetch: fetch
       for (const id of ['subject','tool','grantRoot']) options(ui[id], []);
       for (const id of ['executions','roots','grants','exports']) ui[id].textContent = '当前数据未核验，请刷新后查看。';
       ui.status.textContent = '工具状态读取失败；当前状态不明。'; message(e);
+      ui.hostStatus.textContent = '聊天交付状态未核验。'; ui.hostError.hidden = true; ui.hostError.textContent = '';
     }
     finally { loading = false; if (!disposed) controls(); }
   }

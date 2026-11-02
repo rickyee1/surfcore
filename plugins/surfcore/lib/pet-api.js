@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isLoopbackReq, json, readBody, sameOrigin, safeEqual } from './http-guard.js';
+import { errorResult } from './local-capabilities/supervisor.js';
 
 const API_PREFIX = '/dsh-surfcore/pet-api';
 const HOST_FILE_VERSION = 1;
@@ -34,6 +35,16 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
   const root = path.join(stateDir, 'pet');
   const hostFile = path.join(root, 'host.json');
   let lastHostWrite = 0;
+  async function sendChatResult(res, status, result) {
+    try { await chat.validateDelivery?.(result); chat.validateDeliverySync?.(result); }
+    catch (error) { chat.finishDelivery?.(result, 'failed'); json(res, 409, errorResult(error)); return; }
+    let settled = false;
+    const settle = outcome => { if (settled) return; settled = true; chat.finishDelivery?.(result, outcome); };
+    res.once?.('error', () => settle('unknown'));
+    res.once?.('close', () => settle(res.writableFinished ? 'sent' : 'unknown'));
+    try { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(result), () => settle('sent')); }
+    catch { settle('unknown'); }
+  }
 
   function token() {
     return chat.token();
@@ -121,6 +132,17 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
     const pathname = url.pathname;
     const suffix = pathname.slice(API_PREFIX.length) || '/';
 
+    if (req.method === 'POST' && suffix === '/media/audio-suppressed') {
+      try {
+        const body = JSON.parse((await readBody(req, 1024)) || '{}');
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'nonce') || !/^[a-f0-9]{48}$/.test(body.nonce)) throw new Error('invalid ack');
+        const result = chat.acknowledgeMediaAudio?.(body.nonce);
+        if (!result) { json(res, 503, { ok: false, code: 'MEDIA_HOST_UNAVAILABLE', error: '媒体宿主不可用。', hint: '检查 local 后端和当前桌宠连接。' }); return; }
+        json(res, 200, { ok: true, ...result });
+      } catch (error) { json(res, 409, error.code ? errorResult(error) : { ok: false, code: 'INVALID_REQUEST', error: '语音暂停确认格式无效。', hint: '重新从原桌宠读取当前配置；此接口不能授予设备权限。' }); }
+      return;
+    }
+
     if (req.method === 'GET' && suffix === '/health') {
       json(res, 200, { ok: true, name: 'surfcore-pet', version: String(version || ''), serverTime: Date.now() });
       return;
@@ -161,7 +183,7 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
       let body = {};
       try { body = JSON.parse((await readBody(req, PET_BODY_LIMIT)) || '{}'); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
       const result = await chat.chat({ text: body.text, modality: body.modality });
-      json(res, result.ok ? 200 : 400, result);
+      await sendChatResult(res, result.ok ? 200 : 400, result);
       return;
     }
     if (req.method === 'POST' && suffix === '/focus') {
@@ -176,6 +198,7 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
       let body = {};
       try { body = JSON.parse((await readBody(req, PET_BODY_LIMIT)) || '{}'); } catch {}
       const result = await chat.chat({ text: body.text || '在吗', modality: body.modality === 'voice' ? 'voice' : 'text' });
+      try { await chat.validateDelivery?.(result); chat.validateDeliverySync?.(result); } catch (error) { chat.finishDelivery?.(result, 'failed'); json(res, 409, errorResult(error)); return; }
       if (result.ok && result.reply) {
         chat.emit({
           type: 'reply',
@@ -183,9 +206,10 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
           modality: result.reply.modality,
           audioKey: result.reply.audio?.key || '',
           messageId: result.reply.id,
+          memory_write: result.memory_write,
         });
       }
-      json(res, result.ok ? 200 : 400, result);
+      await sendChatResult(res, result.ok ? 200 : 400, result);
       return;
     }
     if (req.method === 'GET' && suffix === '/events') {
@@ -198,7 +222,7 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
         waitMs: Number.isFinite(wait) ? wait : 0,
         clientId: client,
       });
-      json(res, 200, result);
+      await sendChatResult(res, 200, result);
       return;
     }
     if (req.method === 'GET' && suffix.startsWith('/audio/')) {
@@ -206,19 +230,21 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
       const audio = chat.readAudio(key);
       if (!audio) { json(res, 404, { ok: false, error: '音频不存在或已过期' }); return; }
       try {
+        await audio.guard?.(); audio.syncGuard?.();
         res.writeHead(200, {
           'Content-Type': 'audio/wav',
           'Content-Length': String(audio.bytes.length),
           'Cache-Control': 'private, max-age=86400',
         });
         res.end(audio.bytes);
-      } catch {}
+      } catch (error) { if (!res.headersSent) json(res, 409, errorResult(error)); }
       return;
     }
     json(res, 404, { ok: false, error: `未知桌宠接口：${suffix}` });
   }
 
   return {
+    sendChatResult,
     prefix: API_PREFIX,
     handle,
     writeHostFile,
