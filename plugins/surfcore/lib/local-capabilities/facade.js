@@ -7,6 +7,8 @@ import { TOOLS_UI_OPS } from './tools-client.js';
 import { refineSemanticContext, SEMANTIC_UI_OPS } from './semantic-context.js';
 
 export class LocalCapabilities {
+  // Host-only credentials: never part of a binding, context, state or response.
+  #ingress = new Map();
   constructor({ supervisor, stateFile, currentCharacter }) {
     Object.assign(this, { supervisor, stateFile, currentCharacter });
     this.active = null; this.bindings = new Map(); this.serial = Promise.resolve();
@@ -32,7 +34,7 @@ export class LocalCapabilities {
     this.toolHost?.invalidate('BACKEND_CHANGED');
     // Retire before changing the pointer; failed retire leaves the old guarded state.
     if (this.active && this.supervisor.child && this.active.generation === this.supervisor.generation) await this.supervisor.raw('lifecycle.retire', this.active);
-    this.active = null; this.bindings.clear(); this.state.mode = mode; this.persist();
+    this.active = null; this.bindings.clear(); this.#ingress.clear(); this.state.mode = mode; this.persist();
     if (mode === 'local' || mode === 'shadow') await this.ensureCharacter();
     return this.status();
   }
@@ -47,7 +49,7 @@ export class LocalCapabilities {
       await this.supervisor.start();
       if (this.active && this.active.generation === this.supervisor.generation) await this.supervisor.raw('lifecycle.retire', this.active);
       const result = await this.supervisor.raw('character.activate', {}, { character_id: c.id });
-      this.active = { character_id: c.id, character_epoch: result.character_epoch, key, generation: this.supervisor.generation }; this.bindings.clear();
+      this.active = { character_id: c.id, character_epoch: result.character_epoch, key, generation: this.supervisor.generation }; this.bindings.clear(); this.#ingress.clear();
     });
     this.serial = work.catch(() => {}); await work;
   }
@@ -79,6 +81,26 @@ export class LocalCapabilities {
     return query ? this.refineContext(context, query) : context;
   }
   async refineContext(context, query, options = {}) { return refineSemanticContext(this, context, query, options); }
+  async materials(channel, options = {}) {
+    const { limit = 20 } = options;
+    if (Object.keys(options).some(key => key !== 'limit') || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)
+      throw new CapabilityError('INVALID_REQUEST', '目的素材数量必须为 1–50，且不能指定查询或受众。', '使用实际目的地渠道和有界数量重新读取。');
+    if (!channel || channel.kind === 'management')
+      throw new CapabilityError('PERMISSION_DENIED', '目的素材必须使用实际目的地的普通绑定。', '选择 QQ 或桌宠目的地后重新读取。');
+    const target = this.assertReady();
+    const binding = await this.binding({ ...channel });
+    this.assertReady(target);
+    const result = await this.supervisor.raw('memory.materials', binding, { limit });
+    this.assertReady(target);
+    if (binding.generation !== this.supervisor.generation || binding.key !== this.active?.key ||
+        binding.character_epoch !== this.active?.character_epoch || result.character_epoch !== binding.character_epoch ||
+        ![...this.bindings.values()].some(value => value.session_binding === binding.session_binding))
+      throw new CapabilityError('STALE_CHARACTER', '素材读取期间原绑定已失效。', '丢弃本轮素材，在当前角色重新开始。');
+    return { binding, memory_epoch: result.memory_epoch, records: result.records || [],
+      text: (result.records || []).map(record => record.statement).join('\n'),
+      coverage: { limit, returned_count: (result.records || []).length, has_more: result.has_more,
+        unknown_time_count: result.unknown_time_count, audience_scope: binding.audience_scope } };
+  }
   async validate(context) {
     const current = this.currentCharacter(); assertTargetReady(current.id);
     if (this.mode !== 'local' || context.binding.key !== `${current.id}:${current.epoch}`) throw new CapabilityError('STALE_CHARACTER', '角色或后端已切换，本次回复已取消。');
@@ -97,20 +119,62 @@ export class LocalCapabilities {
     return result;
   }
   endTurn(lease) { if (lease) this.semanticWriter?.end(lease); }
-  async ingest(context, source_event_id, text, { derivedFrom = [], actor = 'unknown' } = {}) {
+  async ingest(context, source_event_id, text, { derivedFrom = [], actor = 'unknown', original = false } = {}) {
     if (typeof source_event_id !== 'string' || !source_event_id || source_event_id.length > 500) throw new CapabilityError('INVALID_REQUEST', '经历事件标识无效。');
     if (!['user', 'assistant', 'external', 'unknown'].includes(actor)) throw new CapabilityError('INVALID_REQUEST', '经历来源类型无效。');
     if (!Array.isArray(derivedFrom) || derivedFrom.length > 20 || derivedFrom.some(source => !source || typeof source.id !== 'string' || !source.id || source.id.length > 200 || !Number.isSafeInteger(source.revision) || source.revision < 1) || new Set(derivedFrom.map(source => source.id)).size !== derivedFrom.length) throw new CapabilityError('INVALID_REQUEST', '派生来源版本无效。');
-    await this.validate(context);
+    if (typeof original !== 'boolean' || original && (derivedFrom.length || actor === 'unknown'))
+      throw new CapabilityError('INVALID_REQUEST', '原始来源不能包含派生证明或未知发言者。', '仅在可信宿主收到本次原始输入、输出或公共来源时声明 original。');
+    // Capture this write's authority once, including the ORIGINAL state object.
+    // host_gate is an opaque frozen capability: keep its identity, never clone it.
+    const target = this.assertReady(), character = { ...this.currentCharacter() }, state = this.state;
+    const { host_gate, ...bindingFields } = context.binding;
+    const binding = Object.freeze({ ...structuredClone(bindingFields), ...(host_gate === undefined ? {} : { host_gate }) });
+    const sourceContext = { binding, memory_epoch: context.memory_epoch }, generation = this.supervisor.generation;
+    const derived = derivedFrom.map(source => ({ id: source.id, revision: source.revision }));
+    const assertOriginal = () => {
+      this.assertReady(target);
+      const current = this.currentCharacter();
+      if (current.id !== character.id || current.epoch !== character.epoch || binding.key !== `${character.id}:${character.epoch}` ||
+          this.store.characters[character.id] !== state || state.mode !== 'local' || !this.supervisor.child ||
+          this.supervisor.generation !== generation || binding.generation !== generation ||
+          this.active?.key !== binding.key || this.active?.character_epoch !== binding.character_epoch ||
+          ![...this.bindings.values()].some(value => value.session_binding === binding.session_binding && value.generation === generation))
+        throw new CapabilityError('STALE_CHARACTER', '原入库角色、绑定或服务代次已失效。', '核对原角色的入库结果；丢弃旧轮，不会转给新角色或自动重试。');
+      this.toolHost?.validateCapture(binding.host_gate);
+    };
+    const validateOriginal = async () => {
+      assertOriginal(); await this.validate(sourceContext); assertOriginal();
+    };
+    if (original && (binding.platform === 'local' || !['pet', 'qq', 'bili'].includes(binding.platform) ||
+        (binding.platform === 'bili' ? actor !== 'external' : !['user', 'assistant'].includes(actor)) ||
+        ![...this.bindings.values()].some(value => value.session_binding === binding.session_binding && value.platform === binding.platform)))
+      throw new CapabilityError('PERMISSION_DENIED', '原始来源类型与原普通渠道绑定不匹配。', '使用本次真实来源的原绑定；管理、迁移和 Writer 不得声明原话。');
+    await validateOriginal(); assertOriginal();
+    let ingress;
+    if (original) {
+      if (!this.#ingress.has(binding.session_binding)) {
+        const opening = this.supervisor.raw('memory.ingress.open', binding).then(result => result.ingress_token);
+        this.#ingress.set(binding.session_binding, opening);
+        opening.catch(() => { if (this.#ingress.get(binding.session_binding) === opening) this.#ingress.delete(binding.session_binding); });
+      }
+      const token = await this.#ingress.get(binding.session_binding);
+      assertOriginal();
+      await validateOriginal();
+      assertOriginal();
+      ingress = { token, kind: { user: 'user_input', assistant: 'assistant_output', external: 'external_source' }[actor] };
+    }
     // Persist intent first: an unknown IPC outcome must never permit rollback to legacy.
-    this.state.written = true; this.persist();
+    assertOriginal(); state.written = true; this.persist(); assertOriginal();
     const refs = [`event:${source_event_id}`, ...(actor !== 'unknown' ? [`writer-origin:${actor}:${crypto.createHash('sha256').update(source_event_id).digest('hex')}`] : [])];
     try {
-      const result = await this.supervisor.raw('memory.ingest', context.binding, { source_event_id, text, source_refs: refs, expected_memory_epoch: context.memory_epoch, ...(derivedFrom.length ? { derived_from: derivedFrom.map(source => source.id), source_revisions: Object.fromEntries(derivedFrom.map(source => [source.id, source.revision])) } : {}) });
-      if (!result.duplicate) this.semanticWriter?.notify(context.binding);
+      assertOriginal();
+      const result = await this.supervisor.raw('memory.ingest', binding, { source_event_id, text, source_refs: refs, expected_memory_epoch: sourceContext.memory_epoch, ...(ingress ? { ingress } : {}), ...(derived.length ? { derived_from: derived.map(source => source.id), source_revisions: Object.fromEntries(derived.map(source => [source.id, source.revision])) } : {}) });
+      assertOriginal();
+      if (!result.duplicate) this.semanticWriter?.notify(binding);
       return result;
     }
-    catch (e) { if (e.code === 'AUTO_WRITE_DISABLED') return { skipped: true, stored: false, memory_epoch: context.memory_epoch }; throw e; }
+    catch (e) { assertOriginal(); if (e.code === 'AUTO_WRITE_DISABLED') return { skipped: true, stored: false, memory_epoch: sourceContext.memory_epoch }; throw e; }
   }
   async management(op, params = {}, expectedCharacter) {
     const allowed = new Set([...SEMANTIC_UI_OPS, ...TOOLS_UI_OPS.filter(op => op !== 'status'),'memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
@@ -149,7 +213,7 @@ export class LocalCapabilities {
     } finally {
       // A lost restore response may still mean the database was replaced. Never
       // reuse a cached binding, or automatically retry an old generated reply.
-      if (op === 'backup.restore.commit') { this.active = null; this.bindings.clear(); }
+      if (op === 'backup.restore.commit') { this.active = null; this.bindings.clear(); this.#ingress.clear(); }
     }
   }
   async setQqOwner(mapping) {
@@ -157,13 +221,13 @@ export class LocalCapabilities {
     this.semanticWriter?.cancel();
     this.toolHost?.invalidate('OWNER_CHANGED');
     if (this.active) await this.supervisor.raw('lifecycle.retire', this.active);
-    this.active = null; this.bindings.clear(); this.state.qqOwner = mapping ? { account: String(mapping.account), peer: String(mapping.peer) } : null; this.persist(); return this.status();
+    this.active = null; this.bindings.clear(); this.#ingress.clear(); this.state.qqOwner = mapping ? { account: String(mapping.account), peer: String(mapping.peer) } : null; this.persist(); return this.status();
   }
   async shareOwner(enabled) {
     if (typeof enabled !== 'boolean') throw new CapabilityError('INVALID_REQUEST', '共享选项必须是布尔值。');
     this.semanticWriter?.cancel();
     this.toolHost?.invalidate('OWNER_SHARING_CHANGED');
     if (this.active) await this.supervisor.raw('lifecycle.retire', this.active);
-    this.active = null; this.bindings.clear(); this.state.shareOwner = enabled; this.persist(); return this.status();
+    this.active = null; this.bindings.clear(); this.#ingress.clear(); this.state.shareOwner = enabled; this.persist(); return this.status();
   }
 }
