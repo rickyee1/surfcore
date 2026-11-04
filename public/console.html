@@ -1796,6 +1796,7 @@ button:active:not(:disabled) {
         <button class="metric metric-link" data-view="sessions"><span>已建立会话</span><strong id="metricSessions">—</strong><small>查看会话映射 <span aria-hidden="true">↗</span></small></button>
         <button class="metric metric-link" data-view="sessions" data-target="section-pending"><span>待处理请求</span><strong id="metricPending">—</strong><small>提问与工具审批 <span aria-hidden="true">↗</span></small></button>
       </div>
+      <div id="localCleanupWarn" class="meta err" role="alert" style="display:none;margin:10px 0"></div>
       <div class="grid">
         <section id="section-mode" data-page="overview" class="card span-all">
       <h2>运行模式</h2>
@@ -2825,9 +2826,16 @@ function renderSnowlumaHealth(sl) {
   el.style.display = '';
 }
 
+function renderLocalCleanup(status) {
+  const warning = document.getElementById('localCleanupWarn');
+  const unresolved = status && (status.failed > 0 || status.pending > 0);
+  warning.style.display = unresolved ? 'block' : 'none';
+  warning.textContent = unresolved ? [status.code, status.error, status.hint].filter(Boolean).join(' · ') : '';
+}
 async function refresh() {
   try {
     const s = await api('/api/status');
+    renderLocalCleanup(s.localCleanup);
     document.querySelectorAll('#modeRow button').forEach(b => (b.classList.toggle('active', b.dataset.mode === s.mode), b.setAttribute('aria-pressed', String(b.dataset.mode === s.mode))));
     document.getElementById('roleText').textContent = s.role || '无';
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
@@ -3108,7 +3116,7 @@ async function refreshSessions() {
     box.querySelectorAll('[data-reset-key]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('确定清除该会话的上下文？下次消息将开新会话。')) return;
       const r = await api('/api/session/reset', 'POST', { key: btn.dataset.resetKey });
-      alert(r.ok ? '✅ 已清除上下文' : ('❌ ' + (r.error || '失败')));
+      alert(r.ok ? '✅ 已清除上下文' : ('❌ ' + [r.code, r.error || '失败', r.hint].filter(Boolean).join(' · ')));
       refreshSessions();
     }));
   } catch {}
@@ -3278,12 +3286,13 @@ document.getElementById('tsSend').addEventListener('click', async () => {
 document.getElementById('restartBtn').addEventListener('click', async () => {
   if (!confirm('确定重启桥接？')) return;
   const r = await api('/api/restart', 'POST', {});
-  document.getElementById('restartMsg').textContent = r.message || '正在重启…';
+  document.getElementById('restartMsg').textContent = r.ok ? (r.message || '正在重启…') : ('❌ ' + [r.code, r.error || '失败', r.hint].filter(Boolean).join(' · '));
+  document.getElementById('restartMsg').className = r.ok ? 'meta ok' : 'meta err';
 });
 document.getElementById('clearWsBtn').addEventListener('click', async () => {
   if (!confirm('确定清空整个「QQ 聊天」工作区？\n将归档全部 QQ 会话、清除所有上下文映射、清空活动日志。\n此操作不可撤销。')) return;
   const r = await api('/api/workspace/reset', 'POST', {});
-  document.getElementById('clearWsMsg').textContent = r.ok ? (`✅ 已归档 ${r.archivedCount} 个会话，工作区已清空`) : ('❌ ' + (r.error || '失败'));
+  document.getElementById('clearWsMsg').textContent = r.ok ? (`✅ 已归档 ${r.archivedCount} 个会话，工作区已清空`) : ('❌ ' + [r.code, r.error || '失败', r.hint].filter(Boolean).join(' · '));
   document.getElementById('clearWsMsg').className = r.ok ? 'meta ok' : 'meta err';
   refreshSessions(); refresh();
 });

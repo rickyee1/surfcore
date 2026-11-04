@@ -3523,6 +3523,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     try { updates.dispose(); } catch {}
     try { petPurpose.stop?.(); } catch {}
     companion.dispose();
+    localChannel.dispose();
     void disposeLocalCapabilities();
     if (petHostTimer) clearInterval(petHostTimer);
     try { sessionEventOff?.(); } catch {}

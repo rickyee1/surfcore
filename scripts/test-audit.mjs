@@ -6,6 +6,8 @@ import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tests = [
   'test-audit-bridge.mjs', 'test-audit-protocol.mjs', 'test-audit-protocol-helpers.mjs',
+  'test-companion-activity.mjs', // real QQ adapter activity/revision gates, isolated loopback only
+  'test-a01-pending-inputs.mjs', // native source ownership across reminder rebuilds, no real transports
   'test-audit-security.mjs', 'test-audit-security-mcp.mjs',
   'test-audit-setup.mjs', 'test-audit-setup-guards.mjs',
   // DSH 会话队列（inbox 投影）解析：0.2.0 把队列从 control baseline 的

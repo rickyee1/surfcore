@@ -58,7 +58,7 @@ const reader = { feed: async ({ exclude = [] } = {}) => exclude.includes(bv) ? [
 const ctx = { get(name) { if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'fixture', model: 'fixture', apiKey: 'FAKE_SECRET_NEVER_IN_OPTIONS' }) }; if (name === 'llm') return { stream(options) { modelCalls.push(options); return (async function* () { if (modelHook) await modelHook(modelCalls.length); yield { type: 'text-delta', text: modelCalls.length % 2 ? '从字幕看，这个想法值得琢磨。' : '刚逛到一个主题，想和你聊聊字幕里的这个想法。' }; if (finish) yield { type: 'finish', reason: { kind: finish } }; })(); } }; throw new Error('unexpected private service'); } };
 const stateDir = path.join(temp, 'coordinator');
 const callBridge = async (pathname, options) => {
-  if (pathname.endsWith('/readiness')) return { ok: true, data: { ok: true, ready: true, ownerIdleMs: 100000000 } };
+  if (pathname.endsWith('/readiness')) return { ok: true, data: { ok: true, ready: true, activity: adapter.activity(adapter.channels.get('private:123')), ownerIdleMs: 100000000 } };
   assert.equal(pathname, '/api/companion/deliver'); assert.deepEqual(Object.keys(options.body), ['intentId']);
   try {
     const result = await adapter.withIntent(options.body.intentId, { guard: async trusted => { assert.equal(trusted.peer, '123'); if (!env.platformEnabled || env.focused || !env.roleActive) throw Object.assign(new Error('paused'), { code: 'COMPANION_PAUSED' }); }, deliver: async () => {
@@ -87,9 +87,52 @@ async function reset() {
     return new Response(JSON.stringify(delivery === 'failed' ? { status: 'failed', retcode: 16 } : { status: 'ok', retcode: 0, data: { message_id: 'fixture-receipt' } }));
   } });
   adapter.channels.set('private:123', { kind: 'qq-private', account: '999', peer: '123', principal: '123' });
+  adapter.beginIncoming('private:123', { self_id: 999, user_id: 123, message_id: 'initial' }).finish();
 }
 try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+  for(const input of ['', 'synthetic new input'])await check('bridge-only restart rejects old rev1 intent; new round sends: '+JSON.stringify(input),async()=>{
+    await reset();await local.management('memory.settings',{auto_write:false});const item=service();item.configure({enabled:true});const issue=channel.issueIntent;let oldActivity,newActivity,oldIntent;
+    channel.issueIntent=async(...args)=>{
+      const intent=await issue(...args);oldIntent=intent;const previous=adapter;oldActivity=previous.activity(previous.channels.get('private:123'));
+      adapter=new LocalChannelBridge({config:()=>config,guarded:()=>true,mode:()=>local.mode,keyFile,fetchImpl:previous.fetchImpl,currentCharacter:previous.currentCharacter});
+      const event={self_id:999,user_id:123,message_id:'AFTER_RESTART'},ticket=adapter.beginIncoming('private:123',event);
+      try{if(input)await adapter.incoming('private:123',event,input);else await rejects(adapter.incoming('private:123',event,input),'INVALID_REQUEST')}finally{ticket.finish()}
+      newActivity=adapter.activity(adapter.channels.get('private:123'));return intent;
+    };
+    try{await rejects(item.run(),'COMPANION_ACTIVITY_CHANGED');assert.equal(sends.length,0);assert.equal(oldActivity.revision,1);assert.equal(newActivity.revision,1);assert.notEqual(oldActivity.epoch,newActivity.epoch);assert.equal(newActivity.foreground,false);
+      await rejects(adapter.withIntent(oldIntent,{guard:async()=>{},deliver:async()=>{throw Error('old body revived')}}),'COMPANION_INTENT_INVALID');
+    }finally{channel.issueIntent=issue}
+    item.dispose();
+    // A fresh coordinator round uses new evidence and the new instance snapshot;
+    // advance only the scheduler clock past the preserved 90 minute cooldown.
+    const newBv='BV2xx411c7mD';const fresh=service({now:()=>Date.now()+91*60000,reader:{feed:async()=>[{bvid:newBv}],read:async()=>({...source,bvid:newBv,url:'https://www.bilibili.com/video/'+newBv})}});
+    assert.equal((await fresh.run()).outcome,'sent');assert.equal(sends.length,1);
+  });
+
+  for(const phase of ['claim-response','final-validation','final-response'])await check('restart across '+phase+' retains host snapshot and retires old bridge origin',async()=>{
+    await reset();await local.management('memory.settings',{auto_write:false});const item=service();item.configure({enabled:true});const originalAdapter=adapter,request=adapter.request.bind(adapter);let switched=false,reserved=false,oldRecord;
+    const restart=async()=>{
+      switched=true;const previous=adapter,oldActivity=previous.activity(previous.channels.get('private:123'));oldRecord=previous.origin.getStore();
+      adapter=new LocalChannelBridge({config:()=>config,guarded:()=>true,mode:()=>local.mode,keyFile,fetchImpl:previous.fetchImpl,currentCharacter:previous.currentCharacter});
+      const event={self_id:999,user_id:123,message_id:'LATE_RESTART'},ticket=adapter.beginIncoming('private:123',event);
+      try{await adapter.incoming('private:123',event,'later synthetic input')}finally{ticket.finish()}
+      const fresh=adapter.activity(adapter.channels.get('private:123'));assert.equal(fresh.revision,oldActivity.revision);assert.notEqual(fresh.epoch,oldActivity.epoch);
+      // A dead process cannot send. Its in-process equivalent explicitly retires
+      // the old adapter after the final RPC has already returned.
+      if(phase==='final-response')previous.invalidate();
+    };
+    originalAdapter.request=async(action,...args)=>{
+      if(phase==='final-validation'&&reserved&&action==='validate'&&!switched)await restart();
+      const result=await request(action,...args);
+      if(action==='attention.reserve')reserved=true;
+      if(!switched&&((phase==='claim-response'&&action==='intent.claim')||(phase==='final-response'&&action==='attention.check'&&args[1]?.params?.reservation_id)))await restart();
+      return result;
+    };
+    await assert.rejects(item.run(),e=>['COMPANION_ACTIVITY_CHANGED','BINDING_INVALID'].includes(e.code)&&!!e.hint);assert.equal(switched,true);assert.equal(sends.length,0);
+    if(phase==='final-response'){assert.ok(oldRecord);assert.throws(()=>originalAdapter.assertRecord(oldRecord));assert.equal(originalAdapter.sessions.size,0);}
+  });
   await check('default disabled; preview reads public materials without models, persistence or sending', async () => {
     await reset(); const item = service(); assert.equal(item.status().config.enabled, false);
     await rejects(item.run(), 'COMPANION_DISABLED'); const result = await item.preview(); assert.equal(result.modelCalled, false); assert.equal(result.sends, false); assert.equal(sends.length, 0); assert.equal(modelCalls.length, 0);
@@ -267,12 +310,12 @@ try {
     const item = service({ now: () => clock, purposeConfig: () => ({ quietStart: '11:00', quietEnd: '12:00', idleThresholdMs: 0, dailyMax: 4 }) }); item.configure({ enabled: true });
     await rejects(item.run(), 'COMPANION_PURPOSE_BLOCKED'); assert.equal(sends.length, 0);
   });
-  await check('owner becomes active or purpose idle threshold tightens while identity is awaited: no transport', async () => {
+  await check('owner activity revision or purpose policy changes while identity is awaited: no transport', async () => {
     for (const kind of ['owner-active', 'policy-change']) {
       await reset(); let idle = 100000000; let purpose = { quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 60000, dailyMax: 4 }; const original = adapter.withIntent.bind(adapter);
-      adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); if (kind === 'owner-active') idle = 0; else purpose = { ...purpose, idleThresholdMs: 200000000 }; }, deliver });
-      const item = service({ purposeConfig: () => purpose, callBridge: async (pathname, options) => pathname.endsWith('/readiness') ? { ok: true, data: { ok: true, ready: true, ownerIdleMs: idle } } : callBridge(pathname, options) }); item.configure({ enabled: true });
-      await rejects(item.run(), kind === 'owner-active' ? 'COMPANION_PURPOSE_BLOCKED' : 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
+      adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); if (kind === 'owner-active') adapter.beginIncoming('private:123', { self_id: 999, user_id: 123, message_id: 'new-active' }).finish(); else purpose = { ...purpose, idleThresholdMs: 200000000 }; }, deliver });
+      const item = service({ purposeConfig: () => purpose }); item.configure({ enabled: true });
+      await rejects(item.run(), kind === 'owner-active' ? 'COMPANION_ACTIVITY_CHANGED' : 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
     }
   });
   await check('intent expiry across policy, context and final IPC awaits blocks transport, including exact expiry', async () => {
@@ -344,6 +387,7 @@ try {
     try {
       h.setMode('chat'); h.setReady(true); h.setSelfIdentity('fixture', '999'); h.setSnowlumaHealth({ connected: true, accountOnline: true });
       const trusted = { kind: 'qq-private', account: '999', peer: '123', principal: '123' }; h.localChannels.channels.set('private:123', trusted);
+      h.localChannels.beginIncoming('private:123', { self_id: 999, user_id: 123, message_id: 'initial' }).finish();
       h.bot.raw = async action => action === 'get_login_info' ? { user_id: 999 } : [{ user_id: 123 }];
       consoleServer = h.startConsoleServer(); if (!consoleServer.listening) await new Promise(resolve => consoleServer.once('listening', resolve));
       const url = `http://127.0.0.1:${consoleServer.address().port}/api/companion/deliver`;

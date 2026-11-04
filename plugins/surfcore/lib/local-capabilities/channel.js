@@ -13,7 +13,46 @@ export function createChannelHandler({ capabilities, keyFile }) {
   const contexts = new Map();
   const intents = new Map();
   const toolDeliveries = new Map();
+  const turnRequests = new Map();
+  const activeRequests = new Set();
+  let disposed = false;
   const canonical = channel => ({ kind: channel.kind, account: String(channel.account || ''), peer: String(channel.peer || ''), principal: channel.kind === 'qq-private' ? String(channel.peer) : String(channel.principal || channel.peer || 'public') });
+  function releaseTurn(turn) {
+    if (!turn?.lease) return;
+    const lease = turn.lease;
+    turn.lease = null;
+    capabilities.endTurn?.(lease);
+  }
+  function cancelTurn(turn) {
+    if (!turn) return;
+    turn.cancelled = true;
+    releaseTurn(turn);
+  }
+  function requestTurn(data, trusted, cancelling) {
+    if (!/^[a-f0-9-]{36}$/.test(data.bridgeInstance || '') || !/^[a-f0-9-]{36}$/.test(data.requestId || '') || !Number.isSafeInteger(data.requestIssuedAt)) {
+      throw new CapabilityError('INVALID_REQUEST', '回合请求标识无效。');
+    }
+    const now = Date.now();
+    // Never evict in-flight or live leases. A cancelled in-flight object remains
+    // cancelled even after its registration window closes.
+    for (const [id, turn] of turnRequests) if (!turn.pending && !turn.lease && turn.expires < now) turnRequests.delete(id);
+    const id = JSON.stringify([trusted, data.bridgeInstance, data.requestId]);
+    const previous = turnRequests.get(id);
+    if (previous) {
+      if (cancelling) return previous;
+      throw new CapabilityError(previous.cancelled ? 'REQUEST_CANCELLED' : 'BINDING_INVALID', '原回合请求已使用或取消，不能重放。');
+    }
+    // Cancellation tombstones outlive every admissible begin. Late begin is
+    // rejected by its original timestamp even after the tombstone is collected.
+    if (data.requestIssuedAt > now + 5000 || now - data.requestIssuedAt > 15000) {
+      if (cancelling) return null;
+      throw new CapabilityError('REQUEST_CANCELLED', '回合登记期限已结束。');
+    }
+    if (turnRequests.size >= 1000) throw new CapabilityError('CHANNEL_BUSY', '渠道回合登记已满。', '结束已有回合后重新发起请求。');
+    const turn = { lease: null, pending: !cancelling, cancelled: cancelling, expires: data.requestIssuedAt + 60000 };
+    turnRequests.set(id, turn);
+    return turn;
+  }
   function checkIntentExpiry(intent) {
     if (Date.now() >= intent.expires) throw new CapabilityError('COMPANION_STOPPED', '主动轮次已过期。', '重新预览并发起新的轮次。');
   }
@@ -27,11 +66,33 @@ export function createChannelHandler({ capabilities, keyFile }) {
     checkIntentExpiry(intent);
   }
   const handler = async (req, res) => {
-    const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
+    const requestStartedAt = Date.now(); const operation = new AbortController();
+    let pendingTurn, pendingHandle;
+    const abandon = () => {
+      cancelTurn(pendingTurn);
+      if (pendingHandle) contexts.delete(pendingHandle);
+    };
+    const abort = () => { operation.abort(); abandon(); };
+    const close = () => { if (!res.writableFinished) abort(); };
+    const detach = () => { req.off('aborted', abort); res.off('close', close); res.off('finish', detach); };
+    req.on('aborted', abort); res.on('close', close);
+    res.once('finish', detach);
+    let streaming = false;
+    const send = (status, data) => {
+      if (res.destroyed || operation.signal.aborted) return;
+      if (!streaming) res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(data) + (streaming ? '\n' : ''));
+    };
+    const stop = () => {
+      send(503, errorResult(new CapabilityError('REQUEST_CANCELLED', '渠道宿主已停止，原回合已取消。')));
+      abort();
+    };
+    activeRequests.add(stop);
     try {
       const supplied = Buffer.from(String(req.headers['x-surfcore-channel-key'] || ''));
       const expected = Buffer.from(key);
       if (req.method !== 'POST' || req.headers.origin || supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) throw new CapabilityError('PERMISSION_DENIED', '渠道调用身份无效。');
+      if (disposed) throw new CapabilityError('SERVICE_UNAVAILABLE', '渠道宿主已停止。');
       let raw = ''; for await (const part of req) { raw += part; if (Buffer.byteLength(raw) > 128 * 1024) throw new CapabilityError('INVALID_REQUEST', '渠道请求过大。'); }
       let data; try { data = JSON.parse(raw); } catch { throw new CapabilityError('INVALID_REQUEST', '渠道请求 JSON 无效。'); }
       const channel = data.channel;
@@ -39,7 +100,10 @@ export function createChannelHandler({ capabilities, keyFile }) {
       // principal comes from authenticated private peer; groups never become owner.
       const trusted = canonical(channel);
       let result, checkedIntent, checkedTool;
-      if (data.action === 'tool.delivery.claim') {
+      if (data.action === 'turn.cancel') {
+        cancelTurn(requestTurn(data, trusted, true));
+        result = { released: true };
+      } else if (data.action === 'tool.delivery.claim') {
         const delivery = toolDeliveries.get(data.deliveryId);
         if (!delivery || delivery.state !== 'issued' || delivery.channel !== JSON.stringify(trusted) || Date.now() >= delivery.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据无效、已使用或已过期。');
         delivery.state = 'claimed';
@@ -62,22 +126,29 @@ export function createChannelHandler({ capabilities, keyFile }) {
         contexts.set(handle, { context: intent.ownerContext, channel: JSON.stringify(trusted), expires: intent.expires, intent });
         result = { context: handle, text: intent.text, outreachId: intent.outreachId, expiresAt: intent.expires };
       } else if (data.action === 'context' || data.action === 'turn.begin') {
+        const writerTurn = data.action === 'turn.begin'
+          ? data.requestId === undefined ? { lease: null } : requestTurn(data, trusted, false)
+          : null;
+        pendingTurn = writerTurn;
         let toolInput;
         if (data.action === 'turn.begin' && data.eventId !== undefined && capabilities.toolHost) {
           await capabilities.binding(trusted);
           toolInput = capabilities.toolHost.input(trusted, { eventId: data.eventId, text: data.text });
         }
-        const writerTurn = data.action === 'turn.begin' ? { lease: await capabilities.beginTurn?.(trusted) } : null;
-        let context;
-        try { context = await capabilities.context(trusted, String(data.query || '').slice(0, 2000)); }
-        catch (error) { capabilities.endTurn?.(writerTurn?.lease); throw error; }
+        if (operation.signal.aborted || disposed || writerTurn?.cancelled) throw new CapabilityError('REQUEST_CANCELLED', '原渠道请求已经取消。');
+        if (writerTurn) writerTurn.lease = await capabilities.beginTurn?.(trusted);
+        if (operation.signal.aborted || disposed || writerTurn?.cancelled) throw new CapabilityError('REQUEST_CANCELLED', '原渠道请求已经取消。');
+        const context = await capabilities.context(trusted, String(data.query || '').slice(0, 2000));
+        if (operation.signal.aborted || disposed || writerTurn?.cancelled) throw new CapabilityError('REQUEST_CANCELLED', '原渠道请求已经取消。');
         const handle = crypto.randomBytes(24).toString('hex');
+        pendingHandle = handle;
         if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
         contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn, toolInput });
         result = { context: handle, text: context.text, memory_epoch: context.memory_epoch, character_epoch: context.binding.character_epoch };
       } else {
         const stored = contexts.get(data.context);
         if (!stored || stored.channel !== JSON.stringify(trusted) || (stored.expires < Date.now() && !['attention.finalize', 'intent.finish', 'tool.delivery.finish', 'turn.end'].includes(data.action))) throw new CapabilityError('BINDING_INVALID', '渠道上下文已失效。', '重新建立本会话上下文。');
+        if (stored.writerTurn?.cancelled && data.action !== 'turn.end') throw new CapabilityError('REQUEST_CANCELLED', '原回合已取消。');
         if (stored.toolDelivery && !['validate', 'tool.delivery.finish'].includes(data.action)) throw new CapabilityError('PERMISSION_DENIED', '工具投递只能验证和结算原内容。');
         // Finalization releases no content; retain the original binding even after stop/correction.
         // Python still verifies reservation ownership and character epoch.
@@ -100,8 +171,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
           await capabilities.validateSourceContext(stored.context);
           result = { valid: true };
         } else if (data.action === 'turn.end') {
-          capabilities.endTurn?.(stored.writerTurn?.lease);
-          if (stored.writerTurn) stored.writerTurn.lease = null;
+          releaseTurn(stored.writerTurn);
           result = { released: true };
         } else if (data.action === 'intent.finish') {
           if (!stored.intent || !['failed', 'unknown'].includes(data.params?.outcome)) throw new CapabilityError('PERMISSION_DENIED', '主动结果结算无效。');
@@ -119,7 +189,19 @@ export function createChannelHandler({ capabilities, keyFile }) {
           result = { ...projection, context: handle };
         }
         else if (data.action === 'context.refine') {
-          const refined = await capabilities.refineContext(stored.context, String(data.query || ''));
+          const progress = data.stream === true ? value => {
+            if (operation.signal.aborted) return;
+            if (!streaming) { res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' }); streaming = true; }
+            res.write(JSON.stringify({ progress: value }) + '\n');
+          } : undefined;
+          const refined = await capabilities.refineContext(stored.context, String(data.query || ''), {
+            signal: operation.signal,
+            requestStartedAt: Number.isFinite(data.requestStartedAt) ? Math.min(data.requestStartedAt, requestStartedAt) : requestStartedAt,
+            readyDeadlineAt: Number.isFinite(data.readyDeadlineAt) ? Math.min(data.readyDeadlineAt, requestStartedAt + 8000) : requestStartedAt + 8000,
+            deadlineAt: Number.isFinite(data.deadlineAt) ? Math.min(data.deadlineAt, requestStartedAt + 120000) : requestStartedAt + 120000,
+            onProgress: progress,
+          });
+          if (operation.signal.aborted) throw new CapabilityError('REQUEST_CANCELLED', '原语义检索请求已经断开。');
           if (refined.memory_epoch !== stored.context.memory_epoch) throw new CapabilityError('STALE_CONTEXT', '语义检索不能更新原回合代次。');
           stored.context = refined;
           result = { context: data.context, text: refined.text, memory_epoch: refined.memory_epoch, retrieval: refined.retrieval };
@@ -140,7 +222,19 @@ export function createChannelHandler({ capabilities, keyFile }) {
       if (checkedIntent) checkIntentExpiry(checkedIntent);
       if (checkedTool) { checkedTool.envelope.syncGuard(); if (Date.now() >= checkedTool.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据已过期。'); }
       send(200, { ok: true, result });
-    } catch (e) { send(e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
+    } catch (e) { abandon(); send(e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
+    finally {
+      activeRequests.delete(stop);
+      if (pendingTurn) pendingTurn.pending = false;
+      if (res.destroyed || res.writableFinished) detach();
+    }
+  };
+  handler.dispose = () => {
+    disposed = true;
+    for (const abort of activeRequests) abort();
+    for (const turn of turnRequests.values()) cancelTurn(turn);
+    for (const stored of contexts.values()) cancelTurn(stored.writerTurn);
+    contexts.clear();
   };
   // Only host code can issue: HTTP has no issue/text/recipient operation.
   handler.issueIntent = async ({ publicContext, ownerContext, channel, text, outreachId, active }) => {

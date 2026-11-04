@@ -37,7 +37,10 @@ async function fixture(run) {
       }});}
     }
     h=await bridgeHarness({config:{sendDelayMs:0,fishGuard:{enabled:false}},globals:{LocalChannelBridge:FixtureBridge,localBackendGuarded:()=>true,localBackendMode:()=>local.mode}});h.setMode('chat');
-    let next=1;const ingress=async(text,account=999)=>h.localChannels.incoming('private:123',{self_id:account,user_id:123,message_id:next++},text);
+    let next=1;const ingress=async(text,account=999)=>{
+      const event={self_id:account,user_id:123,message_id:next++},ticket=h.localChannels.beginIncoming('private:123',event);
+      try{return await h.localChannels.incoming('private:123',event,text);}finally{ticket?.finish();}
+    };
     await ingress('SYNTHETIC_OLD_SCOPE_REQUEST');await h.deliverPrompt('private:123','discarded old history');
     const oldId=h.state.sessions['private:123'],old=h.localChannels.sessions.get(oldId);
     const original=h.localChannels.request.bind(h.localChannels);
@@ -47,6 +50,8 @@ async function fixture(run) {
       return result;
     };
     const issue=async kind=>{
+      // A proactive delivery starts after the ordinary foreground turn settles.
+      await h.localChannels.endSession(oldId);
       const channel=h.localChannels.channels.get('private:123');
       const ownerContext=await local.context({kind:'qq-private',account:'999',peer:'123',principal:'123'});
       if(kind==='tool')return handler.issueToolDelivery({channel,context:ownerContext,text:'SYNTHETIC_LATE_CLAIM_BODY',memory_write:false,expiresAt:Date.now()+60000,guard:()=>local.validate(ownerContext),syncGuard:()=>{}});

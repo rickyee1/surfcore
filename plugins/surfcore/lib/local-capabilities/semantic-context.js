@@ -4,7 +4,7 @@ export const SEMANTIC_UI_OPS = Object.freeze(['memory.semantic.configure', 'memo
   'memory.semantic.query.start', 'memory.semantic.rebuild.start', 'memory.semantic.job.status', 'memory.semantic.job.cancel']);
 const terminal = new Set(['succeeded', 'failed', 'cancelled', 'stale']);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const timeout = () => new CapabilityError('SEMANTIC_CONTEXT_TIMEOUT', '本轮语义检索未在八秒内完成，已取消。',
+const timeout = () => new CapabilityError('SEMANTIC_CONTEXT_TIMEOUT', '本轮语义检索超过准备期限，已取消，尚未生成回答。',
   '在本地语义检索页先重建索引，或关闭语义检索后重新提问；不会自动重试或更换模型。');
 function bounded(promise, ms, signal) {
   return new Promise((resolve, reject) => {
@@ -19,10 +19,14 @@ function bounded(promise, ms, signal) {
 
 /** Integrates the accepted page API without renewing any authority or epoch. */
 export async function refineSemanticContext(capabilities, context, query, { signal, now = Date.now, wait = sleep,
-  budgetMs = 8000, maxPages = 4 } = {}) {
+  budgetMs = 8000, coldBudgetMs = 120000, maxPages = 4, onProgress,
+  requestStartedAt = now(), readyDeadlineAt = Infinity, deadlineAt = Infinity } = {}) {
   const text = String(query || '').trim();
   if (!text) return { ...context, retrieval: { mode: 'recent', reason: 'empty_query' } };
-  const deadline = now() + budgetMs;
+  // One original clock, including authority/status, lazy loading and every page.
+  // Only the first status can select the cold allowance; no failed job is retried.
+  const startedAt = Math.min(now(), requestStartedAt);
+  let deadline = Math.min(readyDeadlineAt, deadlineAt, startedAt + Math.min(8000, budgetMs));
   let activeJob = null, finished = false;
   const check = () => {
     if (signal?.aborted) throw new CapabilityError('REQUEST_CANCELLED', '本轮语义检索已取消。', '重新发起当前角色的对话。');
@@ -38,6 +42,13 @@ export async function refineSemanticContext(capabilities, context, query, { sign
     await validate();
     const status = await rpc('memory.semantic.status', {});
     if (!status.enabled) { await validate(); return { ...context, retrieval: { mode: 'recent', reason: 'semantic_disabled' } }; }
+    const cold = ['unloaded', 'loading', 'unavailable'].includes(status.model_state);
+    if (cold) deadline = Math.min(deadlineAt, startedAt + Math.min(120000, coldBudgetMs));
+    check();
+    if (cold && onProgress) {
+      await bounded(Promise.resolve(onProgress({ state: 'loading', budget_ms: Math.min(120000, coldBudgetMs) })), deadline - now(), signal);
+      await validate();
+    }
     const queryText = Array.from(text).slice(0, 1000).join('');
     const candidates = new Map();
     let offset = 0, covered = 0, eligible = 0, complete = false;

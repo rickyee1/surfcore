@@ -56,6 +56,7 @@ try {
     assert.match(words(tree), /已关闭/); assert.equal(requests.length, 1); assert.equal(requests[0].method, 'GET');
     assert.equal(input('浏览间隔（分钟）').props.value, 60); assert.equal(input('每天最多主动尝试').props.value, 4); assert.equal(input('联系冷却（分钟）').props.value, 90);
     assert.equal(button('立即运行').props.disabled, true); assert.equal(button('停止并关闭').props.disabled, true); capture('default disabled');
+    assert.match(words(tree), /无需空闲30分钟.*正在对话时暂停.*新消息会取消旧想法/);
   });
   await check('explicit enable form does not execute; status polling preserves unsaved preferences', async () => {
     const enabled = all(tree).find(node => node.type === 'input' && node.props.type === 'checkbox'); enabled.props.onChange({ target: { checked: true } });

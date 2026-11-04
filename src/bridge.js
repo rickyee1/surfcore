@@ -1699,6 +1699,7 @@ const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no'
 let stateDirHardened = null;
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
+let stopLocalChannelWork = async () => {};
 async function main() {
   const localChannels = new LocalChannelBridge({ config: () => cfg, currentCharacter: () => readCurrentCharacter(),
     continuity: () => localBackendGuarded() && currentMode === 'reserved2',
@@ -1711,6 +1712,11 @@ async function main() {
       retireSession(key);
       if (retry && triggerKey !== key) scheduleWakeV2(key, 'backlog');
     },
+  });
+  let localChannelStop;
+  stopLocalChannelWork = () => localChannelStop ||= localChannels.dispose().then(result => {
+    if (result.ok === false) localChannelStop = null;
+    return result;
   });
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -3091,6 +3097,23 @@ async function main() {
   // 这里直接用桥接自己覆写的 callUnary（它本来就是为「不依赖旧版客户端域方法」而存在的），
   // 并保留一次 `session/models` 回落以兼容更老的 DSH。
   localChannels.authHeaders = async () => ({ cookie: await api.ensureAuth() });
+  function noteLocalCleanup(cleanup) {
+    if (cleanup?.ok !== false) return;
+    appendActivity(`[local-cleanup] ${cleanup.code} ${cleanup.error} ${cleanup.hint}`);
+    gateEvents.record({ gate: 'local-channel', kind: 'fault', event: 'local-channel-cleanup-failed', action: 'blocked',
+      reason: { code: cleanup.code, message: cleanup.error }, recommendation: cleanup.hint,
+      dedupeKey: `local-cleanup:${cleanup.code}`, confidence: 'confirmed' });
+  }
+  const originalStopSessionWork = api.stopSessionWork.bind(api);
+  api.stopSessionWork = async (sessionId, ...rest) => {
+    const [cleanup, stopped] = await Promise.allSettled([
+      localChannels.cancelSession(sessionId), Promise.resolve().then(() => originalStopSessionWork(sessionId, ...rest)),
+    ]);
+    if (cleanup.status === 'rejected') return { ok: false, code: 'TURN_CLEANUP_FAILED', error: '原回合清理失败。', hint: '检查本地能力宿主后重试停止，以重试原租约清理。' };
+    if (cleanup.value.ok === false) return { ...cleanup.value, stopped: stopped.status === 'fulfilled' };
+    if (stopped.status === 'rejected') throw stopped.reason;
+    return stopped.value;
+  };
   const originalSessionPrompt = api.sessions.prompt.bind(api.sessions);
   api.sessions.prompt = async (args, ...rest) => {
     const packageGate = localChannels.assertReady();
@@ -3102,10 +3125,25 @@ async function main() {
       st.agentToken = crypto.randomBytes(24).toString('hex'); rememberAgentToken(key, st.agentToken);
       st.unread = []; st.recentMessages = []; st.pendingThoughts = []; st.activeTopics = []; st.memberImpressions = {};
     }
-    const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '');
-    if (!isCurrentSession(key, args.sessionId)) { await localChannels.endSession(args.sessionId); throw channelError('TURN_SUPERSEDED', '提示准备期间回合已被新入站接管。'); }
-    try { localChannels.assertReady(packageGate); return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
-    catch (error) { await localChannels.endSession(args.sessionId); throw error; }
+    const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '', {
+      signal: args.signal,
+      onNotice: async phase => {
+        const notice = phase === 'loading'
+          ? '正在准备本机记忆，首次加载可能需要稍等，最多两分钟。准备完成后会继续回答这条消息。'
+          : '本机语义记忆暂未完成准备，这条消息尚未生成回答。请在 SurfCore 本地语义检索页检查状态后重新提问；本轮不会换用其他记忆或模型。';
+        await sendToQQ(key, notice);
+        if (!lastSendSucceeded(key)) throw channelError('DELIVERY_UNKNOWN', '语义准备通知未确认送达，不会重发。');
+      },
+    });
+    if (!isCurrentSession(key, args.sessionId)) {
+      const error = channelError('TURN_SUPERSEDED', '提示准备期间回合已被新入站接管。');
+      throw localChannels.reportCleanup(error, await localChannels.endSession(args.sessionId));
+    }
+    try { localChannels.assertReady(packageGate); localChannels.assertPrepared(args.sessionId); return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
+    catch (error) {
+      const cleanup = await localChannels.endSession(args.sessionId);
+      throw localChannels.reportCleanup(error, cleanup);
+    }
   };
   const modelCatalogErrorLogged = new Set();
   async function fetchModelCatalog() {
@@ -3504,10 +3542,14 @@ async function main() {
    * workspace-reset / reset，以及控制台的二代状态重置）—— 少一处就会留下
    * 「DSH 还在烧 token、桥接已经收不到也发不出」的静默黑洞。
    */
-  function stopRetiredSessionWork(sessionId, key = '') {
+  function stopRetiredSessionWork(sessionId, key = '', reason = 'SESSION_RETIRED') {
+    localChannels.retireSession(sessionId, { reason });
     void (async () => {
-      try { await withTimeout(api.stopSessionWork(sessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
-      catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；本地映射已撤销，请在 DSH 检查旧任务`); }
+      try { await withTimeout(originalStopSessionWork(sessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
+      catch (error) {
+        noteLocalCleanup({ ok: false, code: 'TURN_STOP_FAILED', error: '退休会话的原生停止动作未获确认。', hint: '在 DSH 检查并停止旧任务；本地租约的未确认清理请在控制台重试。' });
+        log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；本地映射已撤销，请在 DSH 检查旧任务`);
+      }
       try { await withTimeout(api.workspace.archiveSession({ sessionId }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); }
       catch (error) { log(`归档失效会话失败 ${key}: ${error?.message ?? error}`); }
     })();
@@ -3533,7 +3575,7 @@ async function main() {
     markReadCalledKeys.delete(key);
   }
 
-  function retireSession(key) {
+  function retireSession(key, { reason = 'SESSION_RETIRED' } = {}) {
     const sessionId = state.sessions[key];
     delete state.sessions[key];
     delete state.sessionPolicies[key];
@@ -3573,7 +3615,7 @@ async function main() {
     }
     saveState();
     saveSocialV2State();
-    stopRetiredSessionWork(sessionId, key);
+    stopRetiredSessionWork(sessionId, key, reason);
     log(`会话权限已变化，停用旧映射 ${key} -> ${sessionId}`);
   }
 
@@ -4297,7 +4339,7 @@ async function main() {
         };
         if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) && obj.ok !== false) {
           void localChannels.validateOrigin().then(() => {
-            if (['/api/socialV2/close', '/api/socialV2/mark-read', '/api/socialV2/wake-config'].includes(url.pathname)) localChannels.acknowledgeOrigin();
+            if (url.pathname === '/api/socialV2/close' && obj.ok === true && !obj.blocked && !obj.alreadyClosed && Number.isFinite(obj.closedAt)) localChannels.acknowledgeOrigin({ closedAt: obj.closedAt });
             emit(obj, status);
           }, error => emit({ ok: false, code: error.code, error: error.message, hint: error.hint }, 409));
         } else emit(obj, status);
@@ -4579,6 +4621,7 @@ async function main() {
             dshReady,
             ownerQQ: cfg.ownerQQ ?? null,
             ownerAudit: ownerAudit.health,
+            localCleanup: localChannels.cleanupStatus(),
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
             socialV2Paused: socialV2.paused,
@@ -5504,7 +5547,7 @@ async function main() {
           }
           if (Object.keys(body).length !== 1 || typeof body.deliveryId !== 'string' || !/^[a-f0-9]{48}$/.test(body.deliveryId)) { sendJson({ ok: false, code: 'INVALID_REQUEST', error: '工具投递只接受宿主单次凭据。', hint: '不得指定正文或目标。' }, 400); return; }
           try {
-            await localChannels.withToolDelivery(body.deliveryId, { guard: companionSendGuard, deliver: (text, key) => onebotSend('private', key.split(':')[1], text) });
+            await localChannels.withToolDelivery(body.deliveryId, { guard: channel => companionSendGuard(channel, { allowForeground: true }), deliver: (text, key) => onebotSend('private', key.split(':')[1], text) });
             sendJson({ ok: true, outcome: 'sent' });
           } catch (error) { sendJson({ ok: false, outcome: error.deliveryOutcome || 'unknown', code: error.code || 'TOOL_DELIVERY_UNKNOWN', error: '工具投递未确认，不会重发。', hint: '核对实际私聊与本机工具收据。' }, 409); }
           return;
@@ -5523,6 +5566,7 @@ async function main() {
           try {
             const delivery = await localChannels.withIntent(body.intentId, {
               guard: companionSendGuard,
+              syncGuard: companionSendGuardSync,
               deliver: (message, key) => onebotSend('private', key.split(':')[1], message),
             });
             sendJson({ ok: true, outcome: 'sent', delivery: { messageId: delivery?.message_id ?? null } });
@@ -6254,13 +6298,15 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('closeConversation')) { sendJson({ ok: false, error: '工具未启用：qq_close_conversation' }, 403); return; }
           try {
+            if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined)) await localChannels.validateOrigin();
             const result = closeConversationV2(key, body);
             sendJson(result);
           } catch (error) {
             sendJson({
               ok: false,
               error: error?.message ?? String(error),
-              code: error?.code,
+              code: error?.code || 'CONVERSATION_CLOSE_FAILED',
+              hint: error?.hint || '先处理当前未答请求或检查渠道状态，再重新判断是否收尾。',
               assessment: error?.assessment,
             }, Number(error?.statusCode) || 400);
           }
@@ -8881,17 +8927,26 @@ async function main() {
           saveSocialV2State();
           saveState();
           // 归档只隐藏会话，不终止 DSH 侧排队的工作；先清队列并取消当前回合。
-          try { await withTimeout(api.stopSessionWork(oldSessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
-          catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
+          let cleanupFailure;
+          try {
+            const stopped = await withTimeout(api.stopSessionWork(oldSessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork');
+            if (stopped?.ok === false) cleanupFailure = stopped;
+          }
+          catch (error) {
+            cleanupFailure = { ok: false, code: 'TURN_STOP_FAILED', error: '停止原会话工作或租约清理未获确认。', hint: '检查 DSH 与本地能力宿主后重试清理。' };
+            log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`);
+          }
           try { await withTimeout(api.workspace.archiveSession({ sessionId: oldSessionId }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
           log(`控制台：已清除会话上下文 ${key}（旧会话 ${oldSessionId} 已停止并归档）`);
-          sendJson({ ok: true, key, archived: oldSessionId });
+          if (cleanupFailure) sendJson({ ...cleanupFailure, key, archived: oldSessionId, hint: '会话映射已重置，但原租约清理未获确认。检查本地能力宿主后点击重启桥接，重试保留的清理任务。' }, 503);
+          else sendJson({ ok: true, key, archived: oldSessionId });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/workspace/reset') {
           sessionEpoch++;
           let archivedCount = 0;
           let stoppedCount = 0;
+          let cleanupFailure;
           try {
             // 新版 DSH 不再提供 workspace.list；改为扫描本桥接创建的会话目录并归档。
             // 只处理 cwd 位于 qq-bridge state/ 下的根会话；子代理会话由父会话管理，不能误归档。
@@ -8907,8 +8962,15 @@ async function main() {
               const cwd = normPath(item.cwd);
               if (isUnderState(cwd)) {
                 // 归档只隐藏会话；必须先把 DSH 侧排队的工作清掉并取消当前回合。
-                try { await withTimeout(api.stopSessionWork(item.sessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); stoppedCount += 1; }
-                catch (error) { log(`⚠️ 停止旧会话失败 ${item.sessionId}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
+                try {
+                  const stopped = await withTimeout(api.stopSessionWork(item.sessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork');
+                  if (stopped?.ok === false) cleanupFailure ||= stopped;
+                  else stoppedCount += 1;
+                }
+                catch (error) {
+                  cleanupFailure ||= { ok: false, code: 'TURN_STOP_FAILED', error: '停止原会话工作或租约清理未获确认。', hint: '检查 DSH 与本地能力宿主后重试清理。' };
+                  log(`⚠️ 停止旧会话失败 ${item.sessionId}：${error?.message ?? error}；请在 DSH 检查旧任务`);
+                }
                 try { await withTimeout(api.workspace.archiveSession({ sessionId: item.sessionId }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); archivedCount += 1; } catch {}
               }
             }
@@ -8951,11 +9013,14 @@ async function main() {
           saveState();
           try { fs.writeFileSync(ACTIVITY_LOG, ''); } catch {}
           log(`控制台：已清空 QQ 聊天工作区（停止 ${stoppedCount} 个、归档 ${archivedCount} 个会话，映射与活动日志已清空）`);
-          sendJson({ ok: true, archivedCount, stoppedCount });
+          if (cleanupFailure) sendJson({ ...cleanupFailure, archivedCount, stoppedCount, hint: '工作区映射已重置，但部分原租约清理未获确认。检查本地能力宿主后点击重启桥接，重试保留的清理任务。' }, 503);
+          else sendJson({ ok: true, archivedCount, stoppedCount });
           return;
         }
         // ── 重启桥接（守护模式下 5 秒后自动拉起） ──────────────────────────────
         if (req.method === 'POST' && url.pathname === '/api/restart') {
+          const cleanup = await stopLocalChannelWork();
+          if (cleanup.ok === false) { sendJson(cleanup, 503); return; }
           sendJson({ ok: true, message: '正在重启桥接（若由守护窗口启动，5 秒后自动恢复）…' });
           setTimeout(() => {
             log('控制台：重启桥接');
@@ -9319,13 +9384,14 @@ async function main() {
     return body.data;
   }
 
-  function companionReadiness() {
+  function companionReadiness({ allowForeground = false } = {}) {
     const owner = String(cfg.ownerQQ || ''); const key = `private:${owner}`;
     const trusted = localChannels.channels.get(key);
     const roleActive = readRoleState().mode !== 'silent';
     const explicit = (cfg.allow?.private || []).some(id => String(id) === owner);
-    const st = socialV2.conversations.get(key);
-    const lastAt = Math.max(Number(st?.lastIncomingAt) || 0, Number(st?.lastAiReplyAt) || 0);
+    const activity = localChannels.activity(trusted);
+    const foreground = Boolean(activity?.foreground || pending.has(key) || isConversationBusyV2(key, socialV2.conversations.get(key)));
+    const lastAt = Math.max(activity?.receivedAt || 0, activity?.lastSentAt || 0);
     const checks = [
       [localBackendGuarded(), 'COMPANION_LOCAL_REQUIRED', '主动协调器需要本地能力后端。'],
       [currentMode === 'chat', 'COMPANION_CHAT_REQUIRED', '自主主人私聊当前只接入 chat 模式。'],
@@ -9333,13 +9399,18 @@ async function main() {
       [snowlumaHealth.connected && snowlumaHealth.accountOnline === true && dshReady, 'COMPANION_QQ_NOT_READY', 'QQ、账号或 DSH 尚未在线。'],
       [owner && explicit && allowed('private', Number(owner), cfg), 'OWNER_NOT_ALLOWED', '主人不在明确的私聊白名单中。'],
       [trusted && trusted.kind === 'qq-private' && String(selfUserId || '') === trusted.account, 'BINDING_INVALID', '缺少当前机器人与主人之间的可信入站身份。'],
+      [activity && activity.peer === owner, 'BINDING_INVALID', '缺少当前机器人与主人之间的可信活动记录。'],
+      [allowForeground || !foreground, 'COMPANION_FOREGROUND', '主人当前对话仍在处理，主动联系已暂停。'],
     ];
     const blocked = checks.find(([ok]) => !ok);
-    return { ok: !blocked, ready: !blocked, mode: currentMode, ownerIdleMs: lastAt ? Date.now() - lastAt : Number.MAX_SAFE_INTEGER, ...(blocked ? { code: blocked[1], error: blocked[2], hint: '核对 chat 模式、角色/专注状态、账号在线和主人私聊白名单；由主人先发一条消息。' } : {}) };
+    return { ok: !blocked, ready: !blocked, mode: currentMode, activity: activity ? { ...activity, foreground } : null, ownerIdleMs: lastAt ? Math.max(0, Date.now() - lastAt) : 0, ...(blocked ? { code: blocked[1], error: blocked[2], hint: '核对 chat 模式、角色/专注状态、账号在线和主人私聊白名单；等待当前对话结束，无可信活动时由主人先发一条消息。' } : {}) };
   }
-  async function companionSendGuard(channel) {
-    const state = companionReadiness();
+  function companionSendGuardSync(channel, options) {
+    const state = companionReadiness(options);
     if (!state.ready || localChannels.channels.get(`private:${channel.peer}`)?.account !== channel.account || String(cfg.ownerQQ) !== channel.peer) throw channelError(state.code || 'BINDING_INVALID', state.error || '主人或机器人身份已变化。', state.hint);
+  }
+  async function companionSendGuard(channel, options) {
+    companionSendGuardSync(channel, options);
     // Confirm the actual account before transport. No fallback when identity/friend checks fail.
     let login; let friends;
     try {
@@ -9348,7 +9419,7 @@ async function main() {
     } catch { throw channelError('COMPANION_QQ_NOT_READY', '发送前无法确认当前账号或好友关系，本轮已停止。'); }
     const info = login?.data || login; const list = Array.isArray(friends) ? friends : friends?.data;
     if (String(info?.user_id || '') !== channel.account || !Array.isArray(list) || !list.some(item => String(item.user_id) === channel.peer)) throw channelError('BINDING_INVALID', '发送前账号或主人好友关系不匹配，本轮已停止。');
-    const final = companionReadiness(); if (!final.ready) throw channelError(final.code, final.error, final.hint);
+    companionSendGuardSync(channel, options);
   }
 
   // 直接发任意 OneBot 消息段（卡片/分享卡用）。文本发送仍走 sendToQQ，
@@ -9979,7 +10050,7 @@ async function main() {
     const epoch = sessionEpoch;
     const policy = sessionPolicy(key);
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
-    if (localBackendGuarded() && state.sessions[key]) retireSession(key);
+    if (localBackendGuarded() && state.sessions[key]) retireSession(key, { reason: isCurrentSession(key, state.sessions[key]) ? 'TURN_REBUILD' : 'SESSION_RETIRED' });
     const existing = state.sessions[key];
     if (existing) {
       // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
@@ -11107,12 +11178,12 @@ async function main() {
     return normalizeClosureConfig(cfg.socialV2?.closure ?? {});
   }
 
-  function assessClosureV2(key, st) {
+  function assessClosureV2(key, st, messages) {
     if (!st) st = getSocialV2State(key);
     return assessConversationClosure({
       key,
       kind: String(key ?? '').startsWith('private:') ? 'private' : 'group',
-      messages: st.recentMessages,
+      messages: messages || st.recentMessages,
       unread: st.unread,
       now: Date.now(),
       lastAiReplyAt: st.lastAiReplyAt,
@@ -11150,7 +11221,8 @@ async function main() {
       throw error;
     }
     const st = getSocialV2State(key);
-    const plan = planClose({ st, sendFailed: lastSendFailed.get(key) === true });
+    const origin = localBackendGuarded() ? localChannels.origin.getStore() : null;
+    const plan = planClose({ st, sendFailed: lastSendFailed.get(key) === true || origin?.key === key && origin.uncertain === true });
     if (plan.blocked) {
       if (plan.code === 'CLOSE_AFTER_SEND_FAILED') {
         const error = new Error(plan.error);
@@ -11161,7 +11233,11 @@ async function main() {
       }
       return { ok: true, key, ...plan };
     }
-    const assessment = assessClosureV2(key, st);
+    // Local prompts contain native sources and intentionally omit old history.
+    // Assess the displayed, still-unanswered sources with the same close gate.
+    const messages = origin?.key === key && origin.inputs?.length
+      ? origin.inputs.map(input => ({ text: input.text, plain: input.text, time: Date.now(), isSelf: false })) : undefined;
+    const assessment = assessClosureV2(key, st, messages);
     const gate = closeGate(assessment, config);
     if (gate.blocked) {
       const error = new Error(gate.error);
@@ -14689,6 +14765,13 @@ async function main() {
       log(`[黑名单] 忽略 ${key} 来自 ${event.user_id} 的消息（deny.users）`);
       return;
     }
+    let activityTicket;
+    if (localBackendGuarded() && kind === 'private' && String(id) === String(cfg.ownerQQ)) {
+      if (!selfUserId || String(event.self_id || '') !== String(selfUserId) || String(event.user_id || '') !== String(id)) throw channelError('BINDING_INVALID', '入站机器人或主人身份与当前登录账号不符。');
+      activityTicket = localChannels.beginIncoming(key, event);
+      if (activityTicket?.duplicate) return;
+    }
+    try {
     const resolveAtName = async (qq) => {
       // 只有群聊才需要把 @QQ号 解析成群名片/昵称；私聊没有群成员概念
       if (kind !== 'group') return null;
@@ -14700,6 +14783,7 @@ async function main() {
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     const localIngress = await localChannels.incoming(key, event, plainContent);
+    noteLocalCleanup(localIngress?.cleanup);
     if (localBackendGuarded() && localIngress?.duplicate) return;
     if (localBackendGuarded() && localIngress) {
       const toolResult = await localChannels.handleTools(key, localIngress, (text, target) => onebotSend('private', target.split(':')[1], text));
@@ -14857,9 +14941,15 @@ async function main() {
           saveSocialV2State();
           saveState();
           // 与 retireSession 一致：先终止 DSH 侧排队的工作，再归档（归档只隐藏会话）。
-          try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
-          catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
+          let cleanup;
+          try { cleanup = await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
+          catch (error) { cleanup = { ok: false, code: 'TURN_STOP_FAILED', error: '原会话停止或租约清理未获确认。', hint: '检查 DSH 与本地能力宿主后，在控制台重启桥接重试保留的清理任务。' }; }
           try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
+          if (cleanup?.ok !== false && localIngress?.cleanup?.ok === false) cleanup = localIngress.cleanup;
+          if (cleanup?.ok === false) {
+            noteLocalCleanup(cleanup);
+            return { ...cleanup, reset: true, accepted: localIngress?.accepted === true };
+          }
           await sendToQQ(key, '已重置会话，下次消息将开新上下文');
         }
         return;
@@ -15231,6 +15321,7 @@ async function main() {
     }
     if (cfg.ackMessage && currentMode !== 'reserved2') await sendToQQ(key, cfg.ackMessage);
     log(`已投递 ${key}: ${promptText.slice(0, 80)}${promptText.length > 80 ? '…' : ''}`);
+    } finally { activityTicket?.finish(); }
   }
 
   // 取消/拒绝一个挂起的提问或审批，并给 DSH 回执（超时、被新请求覆盖时使用）
@@ -15957,7 +16048,7 @@ async function main() {
                   }
                 }
               }
-              } finally { await localChannels.endSession(frame.sessionId); }
+              } finally { noteLocalCleanup(await localChannels.endSession(frame.sessionId)); }
             }
           } else if ((frame.type === 'question/requested' || frame.type === 'approval/requested') && learnerSessions.has(frame.sessionId)) {
             // 黑话学习会话不应向用户提问/请求审批；自动跳过，避免阻塞学习任务。
@@ -16392,14 +16483,18 @@ async function main() {
   await pumpMux();
 }
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   log('退出中…');
   saveState();
+  const result = await stopLocalChannelWork();
+  if (result?.ok === false) { log(result.code, result.error, result.hint); return; }
   releaseLock();
   process.exit(0);
 });
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   saveState();
+  const result = await stopLocalChannelWork();
+  if (result?.ok === false) { log(result.code, result.error, result.hint); return; }
   releaseLock();
   process.exit(0);
 });

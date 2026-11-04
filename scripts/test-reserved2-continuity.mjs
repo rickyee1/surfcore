@@ -35,6 +35,7 @@ async function fixture(run,{autoWrite=true}={}) {
       async handleTools(){return {handled:false};}
     }
     h=await bridgeHarness({config:{sendDelayMs:0,fishGuard:{enabled:false},socialV2:{wake:{preSleepWaitEnabled:true,preSleepWaitMs:300000},send:{burstIntervalMinMs:100,burstIntervalMaxMs:100,maxGapMs:100},wait:{minMs:100,maxMs:600000,minQuietAfterNewMs:100},proactive:{enabled:false},sticker:{enabled:false}}},globals:{LocalChannelBridge:FixtureBridge,localBackendGuarded:()=>true,localBackendMode:()=>local.mode,__auditMuxOnce:true}});
+    h.setSelfIdentity('fixture', '999');
     h.setMode('reserved2');consoleServer=h.startConsoleServer();if(!consoleServer.listening)await new Promise(resolve=>consoleServer.once('listening',resolve));
     const request=(route,body,token)=>new Promise((resolve,reject)=>{
       const req=http.request({hostname:'127.0.0.1',port:consoleServer.address().port,path:`/api/socialV2/${route}`,method:'POST',headers:{'x-console-token':'fixture-console-token','x-agent-token':token,'content-type':'application/json'}},res=>{let text='';res.on('data',chunk=>text+=chunk);res.on('end',()=>resolve({status:res.statusCode,...JSON.parse(text)}));});req.on('error',reject);req.setTimeout(5000,()=>req.destroy(new Error('fixture request timeout')));req.end(JSON.stringify(body));
@@ -185,10 +186,10 @@ test('late successful validate RPC cannot send bytes after ingress synchronously
   await blocked;await incoming('Synthetic supplement after old validation');release();await rejected;assert.equal(outgoing.length,0);
 }));
 
-test('successful close with no send does not resurrect already acknowledged input on the next ingress',()=>fixture(async({h,incoming,wake,request})=>{
-  await incoming('Synthetic acknowledged but unanswered greeting');await wake();const st=h.getSocialV2State('private:123');
-  st.recentMessages.push({text:'晚安，不聊了',plain:'晚安，不聊了',isSelf:false,time:Date.now()});
-  assert.equal((await request('close',{key:'private:123',reason:'explicit_end'},st.agentToken)).ok,true);
+test('successful native close with no send settles displayed input on the next ingress',()=>fixture(async({h,incoming,wake,request})=>{
+  await incoming('晚安，不聊了');await wake();const st=h.getSocialV2State('private:123');
+  const closed=await request('close',{key:'private:123',reason:'explicit_end'},st.agentToken);
+  assert.equal(closed.ok,true);assert.ok(closed.closedAt);assert.equal(closed.blocked,undefined);
   await incoming('Synthetic new request after natural close');await wake();
   assert.deepEqual(h.localChannels.sessions.get(h.state.sessions['private:123']).inputs.map(item=>item.text),['Synthetic new request after natural close']);
 }));

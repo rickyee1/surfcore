@@ -63,7 +63,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
   function policy(config) {
     // Reuse existing purpose scheduling and quiet hours, with this unit's conservative defaults.
     const old = purposeConfig() || {};
-    return { ...normalizePurposeConfig(old), enabled: true, dailyMax: Math.min(config.dailyMax, old.dailyMax > 0 ? old.dailyMax : config.dailyMax), gapMinMs: config.cooldownMinutes * 60000, gapMaxMs: config.cooldownMinutes * 60000, idleThresholdMs: Number.isFinite(old.idleThresholdMs) ? Math.max(0, old.idleThresholdMs) : 30 * 60000 };
+    return { ...normalizePurposeConfig(old), enabled: true, dailyMax: Math.min(config.dailyMax, old.dailyMax > 0 ? old.dailyMax : config.dailyMax), gapMinMs: config.cooldownMinutes * 60000, gapMaxMs: config.cooldownMinutes * 60000, idleThresholdMs: 0 };
   }
   function assertActive(snapshot) {
     if (disposed || snapshot.controller.signal.aborted || capabilities.mode !== 'local' || JSON.stringify(character()) !== JSON.stringify(snapshot.character) || configRecord(snapshot.files).revision !== snapshot.revision || !configRecord(snapshot.files).config.enabled) throw fail('COMPANION_STOPPED', '角色、后端或自主设置已变化，本轮已取消。');
@@ -81,6 +81,10 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
     if (!response.ok || !response.data?.ok || !response.data.ready) throw fail(response.data?.code || 'COMPANION_QQ_NOT_READY', response.data?.error || 'QQ 主人私聊尚未就绪。', response.data?.hint || '检查 QQ 桥接、账号在线、主人白名单与 chat 模式。');
     assertActive(snapshot);
     const channel = { kind: 'qq-private', account: owner.account, peer: owner.peer, principal: owner.peer };
+    const activity = response.data.activity;
+    if (!activity || typeof activity.epoch !== 'string' || !activity.epoch || activity.account !== channel.account || activity.peer !== channel.peer || !Number.isSafeInteger(activity.revision) || activity.revision < 1 || activity.foreground) throw fail('COMPANION_ACTIVITY_CHANGED', '缺少可信活动记录或主人仍在对话，本轮已取消。');
+    if (snapshot.activity && (snapshot.activity.epoch !== activity.epoch || snapshot.activity.account !== activity.account || snapshot.activity.peer !== activity.peer || snapshot.activity.revision !== activity.revision)) throw fail('COMPANION_ACTIVITY_CHANGED', '主人已有新活动，旧主动想法已取消。', '等待当前对话结束，由下一轮重新形成想法；不会补发旧正文。');
+    snapshot.activity ||= { epoch: activity.epoch, account: activity.account, peer: activity.peer, revision: activity.revision };
     return { channel, ownerIdleMs: Number(response.data.ownerIdleMs) || 0 };
   }
   async function deliveryPolicy(snapshot) {
@@ -101,7 +105,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
     return record;
   }
   async function textModel(system, input, snapshot, label, max = 800) {
-    assertActive(snapshot);
+    await ready(snapshot);
     if (tokenBudget?.block && (await tokenBudget.block('bili'))?.blocked) throw fail('TOKEN_BUDGET_BLOCKED', '今日模型预算已达到上限。', '等待额度恢复或在设置中调整预算。');
     assertActive(snapshot);
     const target = ctx?.get('agentDefaultModel')?.currentSelection?.(); const llm = ctx?.get('llm');
@@ -121,7 +125,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
         if (!finished || !result.trim()) throw fail('COMPANION_MODEL_INCOMPLETE', '模型未返回完整正文，本轮没有发送。', '检查默认模型连接后重新运行。');
         return result.trim();
       })(), new Promise((_, reject) => { timeout = setTimeout(() => { control.abort(); reject(fail('COMPANION_MODEL_TIMEOUT', '模型生成超时，本轮没有发送。', '检查模型连接，稍后重试。')); }, modelTimeoutMs); }), new Promise((_, reject) => { snapshot.controller.signal.addEventListener('abort', () => reject(fail('COMPANION_STOPPED', '本轮已取消。')), { once: true }); })]);
-      assertActive(snapshot); return output;
+      await ready(snapshot); return output;
     } catch (e) { if (e instanceof CapabilityError) throw e; throw fail('MODEL_UNAVAILABLE', '模型调用失败，本轮没有发送。', '检查 DSH 默认模型和供应商凭据；本轮不会自动重试。'); }
     finally {
       clearTimeout(timeout); control.abort(); snapshot.controller.signal.removeEventListener('abort', abort);
@@ -147,6 +151,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
       state = stateRecord(f); const p = policy(config); state.purpose = normalizePurposeState(state.purpose, now());
       const readyOwner = await ready(snapshot);
       writerLease = await capabilities.beginTurn(readyOwner.channel);
+      await ready(snapshot);
       if (automatic && state.nextBrowseAt > now()) return { ok: true, skipped: true, reason: 'interval', nextBrowseAt: state.nextBrowseAt };
       const decision = evaluatePurposeTick({ now: now(), config: p, state: state.purpose, env: { enabled: true, modeOk: true, dshReady: true, ownerAllowed: true, ownerIdleMs: readyOwner.ownerIdleMs } });
       if (decision.action !== 'run') throw fail('COMPANION_PURPOSE_BLOCKED', `目的排程暂不出发：${decision.reason}`, '等待冷却、安静时段或主人当前对话结束；不会绕过统一注意力设置。');
@@ -166,6 +171,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
       let materialRecord = await sourceRecord(publicContext, eventId);
       let ingested = { stored: true, memory_epoch: publicContext.memory_epoch };
       if (materialRecord.status === 'missing') {
+        await ready(snapshot);
         ingested = await capabilities.ingest(publicContext, eventId, freshMaterial, { actor: 'external' }); assertActive(snapshot);
         publicContext = await capabilities.context(publicChannel);
         if (publicContext.memory_epoch !== ingested.memory_epoch) throw fail('STALE_CONTEXT', '资料入库期间出现其他记忆变更，本轮已取消。');
@@ -186,6 +192,7 @@ export function createAutonomousCompanion({ ctx, capabilities, channelHandler, s
       await capabilities.validate(publicContext); assertActive(snapshot);
       let thoughtWrite = { skipped: true, stored: false, memory_epoch: publicContext.memory_epoch };
       if (!ephemeral) {
+        await ready(snapshot);
         const thoughtEvent = `bili:public:${source.bvid}:thought:${materialRecord.id}:${materialRecord.revision}`;
         await sourceRecord(publicContext, thoughtEvent);
         thoughtWrite = await capabilities.ingest(publicContext, thoughtEvent, thought, { derivedFrom: [{ id: materialRecord.id, revision: materialRecord.revision }], actor: 'assistant' }); assertActive(snapshot);

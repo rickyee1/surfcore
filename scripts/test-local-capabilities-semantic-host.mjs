@@ -15,7 +15,7 @@ function hostFixture({ eligible = 2, enabled = true } = {}) {
     memories: eligible ? [{ id: `semantic-${offset}`, statement: `相关经历${offset}`, semantic_score: .9 - offset / 10000 }] : [] });
   const capabilities = { async validate(value) { assert.strictEqual(value, context); if (state.epoch !== value.memory_epoch || state.role !== value.binding.character_id) throw new CapabilityError('STALE_CONTEXT', '原记忆已变更。'); await hooks.validate?.(); },
     supervisor: { async raw(op, binding, params) { assert.strictEqual(binding, context.binding); calls.push({ op, params }); const value = await hooks[op]?.(params); if (value !== undefined) return value;
-      if (op === 'memory.semantic.status') return { enabled: state.enabled };
+      if (op === 'memory.semantic.status') return { enabled: state.enabled, model_state: 'ready' };
       if (op === 'memory.semantic.query.start') return result(params.offset);
       if (op === 'memory.semantic.job.status') return result(Number(params.job_id.slice(4)));
       if (op === 'memory.semantic.job.cancel') return { state: 'cancelled' }; throw Error(op); } } };
@@ -50,6 +50,38 @@ await check('timeout cancels ongoing page and never uses recent context as a fak
   const f = hostFixture(); f.hooks['memory.semantic.query.start'] = () => ({ ...f.result(0), state: 'running' }); f.hooks['memory.semantic.job.status'] = () => ({ ...f.result(0), state: 'running' });
   await assert.rejects(f.run('query', { budgetMs: 200 }), e => e.code === 'SEMANTIC_CONTEXT_TIMEOUT' && e.hint.length > 0); assert.equal(f.calls.at(-1).op, 'memory.semantic.job.cancel');
 });
+await check('cold model may finish after eight seconds within one original 120 second budget', async () => {
+  const f = hostFixture(); const progress = [];
+  f.hooks['memory.semantic.status'] = () => ({ enabled: true, model_state: 'unloaded' });
+  f.hooks['memory.semantic.query.start'] = () => ({ ...f.result(0), state: 'running' });
+  f.hooks['memory.semantic.job.status'] = () => { f.advance(37000); return f.result(0); };
+  const result = await f.run('query', { onProgress: value => progress.push(value) });
+  assert.equal(result.retrieval.mode, 'semantic'); assert.equal(result.memory_epoch, 7);
+  assert.equal(progress[0].state, 'loading'); assert.equal(progress[0].budget_ms, 120000);
+  assert.equal(f.calls.filter(c => c.op.endsWith('query.start')).length, 1);
+});
+await check('cold timeout uses original deadline across status and all pages, never extends again', async () => {
+  const f = hostFixture({ eligible: 80 });
+  f.hooks['memory.semantic.status'] = () => { f.advance(6000); return { enabled: true, model_state: 'loading' }; };
+  f.hooks['memory.semantic.query.start'] = ({ offset }) => ({ ...f.result(offset), state: 'running' });
+  f.hooks['memory.semantic.job.status'] = ({ job_id }) => { f.advance(job_id === 'job-0' ? 110000 : 5000); return f.result(Number(job_id.slice(4))); };
+  await assert.rejects(f.run(), e => e.code === 'SEMANTIC_CONTEXT_TIMEOUT');
+  assert.equal(f.calls.filter(c => c.op.endsWith('query.start')).length, 2);
+  assert.equal(f.calls.at(-1).op, 'memory.semantic.job.cancel');
+});
+await check('ready model retains eight seconds and cold failure never retries or refreshes authority', async () => {
+  const ready = hostFixture();
+  ready.hooks['memory.semantic.query.start'] = () => { ready.advance(8001); return ready.result(0); };
+  await assert.rejects(ready.run(), e => e.code === 'SEMANTIC_CONTEXT_TIMEOUT');
+  for (const state of ['loading', 'unavailable']) {
+    const f = hostFixture();
+    f.hooks['memory.semantic.status'] = () => ({ enabled: true, model_state: state });
+    f.hooks['memory.semantic.query.start'] = () => ({ ...f.result(0), state: 'failed', code: 'SEMANTIC_WORKER_FAILED', error: '不可用。', hint: '检查本机模型。' });
+    await assert.rejects(f.run(), e => e.code === 'SEMANTIC_WORKER_FAILED');
+    assert.equal(f.calls.filter(c => c.op.endsWith('query.start')).length, 1);
+    assert.equal(f.context.memory_epoch, 7);
+  }
+});
 await check('abort during start returns promptly and a late job ID is cancelled once', async () => {
   const f = hostFixture(), gate = deferred(), started = deferred(), controller = new AbortController();
   f.hooks['memory.semantic.query.start'] = () => { started.resolve(); return gate.promise; };
@@ -64,6 +96,26 @@ await check('busy, wrong coverage and mixed epochs stay structured failures', as
   }; await assert.rejects(f.run(), e => !!e.code && !!e.hint); }
 });
 
+
+await check('original ready deadline includes queue, first status and validation, even when cold', async () => {
+ for(const stage of ['queue','status','validate']){
+  const f=hostFixture();
+  if(stage==='queue')f.advance(8000);
+  if(stage==='status')f.hooks['memory.semantic.status']=()=>{f.advance(8000);return{enabled:true,model_state:'unloaded'}};
+  if(stage==='validate')f.hooks.validate=()=>f.advance(8000);
+  await assert.rejects(f.run('query',{requestStartedAt:0,readyDeadlineAt:8000,deadlineAt:120000}),e=>e.code==='SEMANTIC_CONTEXT_TIMEOUT'&&!!e.hint);
+  assert.equal(f.calls.filter(c=>c.op.endsWith('query.start')).length,0);
+ }
+});
+await check('both absolute deadlines only tighten and ready cannot inherit the cold limit', async () => {
+ for(const cold of [false,true]){
+  const f=hostFixture();let progressed=0;
+  f.advance(3000);f.hooks['memory.semantic.status']=()=>({enabled:true,model_state:cold?'unloaded':'ready'});
+  f.hooks['memory.semantic.query.start']=()=>{f.advance(cold?2001:501);return f.result(0)};
+  await assert.rejects(f.run('query',{requestStartedAt:0,readyDeadlineAt:3500,deadlineAt:5000,onProgress:()=>progressed++}),e=>e.code==='SEMANTIC_CONTEXT_TIMEOUT');
+  assert.equal(progressed,cold?1:0);assert.equal(f.calls.filter(c=>c.op.endsWith('query.start')).length,1);
+ }
+});
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this._text = ''; this.value = ''; this.checked = false; this.disabled = false; this.hidden = false; }
   set textContent(value) { this._text = String(value); this.children = []; } get textContent() { return this._text + this.children.map(x => x.textContent).join(''); }

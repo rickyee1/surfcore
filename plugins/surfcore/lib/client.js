@@ -3534,7 +3534,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const source = preview?.source;
       return h("div", { className: "qbw-card", style: { width: "100%", boxSizing: "border-box", marginBottom: "10px" } },
         h("h4", null, "自主浏览与主人私聊"),
-        h("p", null, "自主浏览 B站公开内容、形成想法，再按限制私聊已绑定主人。不会通过这里发布 B站评论、动态或私信。"),
+        h("p", null, "自主浏览 B站公开内容、形成想法，再按限制私聊已绑定主人。有值得说的想法即可联系，无需空闲30分钟；正在对话时暂停，新消息会取消旧想法。不会通过这里发布 B站评论、动态或私信。"),
         h("div", { className: "qbw-kv" }, h("span", null, "当前状态"), h("span", null, data ? `${data.config?.enabled ? "已开启" : "已关闭"} · ${data.running || working === "run" ? "运行中" : "空闲"}` : "读取中…")),
         h("div", { className: "qbw-kv" }, h("span", null, "下次浏览"), h("span", null, data?.nextBrowseAt ? fmtTime(data.nextBrowseAt) : "尚未排定")),
         h("div", { className: "qbw-kv" }, h("span", null, "最近结果"), h("span", null, last ? `${fmtTime(last.at)} · ${outcome}` : outcome)),
