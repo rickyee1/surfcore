@@ -101,7 +101,10 @@ class ToolBroker:
                     target_summary=json_load(row['target']), confirmation_digest=row['confirmation_digest'],
                     result_id=row['result_id'], result_revision=1 if row['result_id'] else None,
                     local_only=row['tool'] != 'time.now', error_code=row['error_code'])
-        if row['error_code']:
+        if row['state'] == 'unknown':
+            item.update(error='本机工具执行结果不明，操作可能已经生效。',
+                        hint='请人工核对目标窗口或实际结果；不要重放旧执行，以免重复操作。')
+        elif row['error_code']:
             item.update(error='本机工具未完成。', hint='核验当前目标和权限；unknown 状态请先人工核验，不重放旧执行。')
         if session['management']:
             item.update(arguments=json_load(row['arguments']), subject=json_load(row['subject']))

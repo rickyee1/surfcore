@@ -1,5 +1,9 @@
 # 踩坑档案（PITFALLS）
 
+## 2026-11-04 工具 unknown 的呈现与测试隔离
+
+Explorer可能已经打开目标窗口，而启动进程的回执仍无法确认。保留unknown并提示核对窗口，host须透传该终态及broker的error/hint。异步handle会提前启动step，测试的RPC拦截必须在handle之前安装，Python夹具还需在服务启动前硬拒绝GUI子进程。实测、早期夹具副作用不确定性和验证见[工具结果记录](cases/2026-11-04-tool-outcome-unknown.md)。
+
 ## 2026-11-02：终态与配置加载事务的边界
 
 语音包导入只有在清理/旧包恢复真正完成后才能发布失败终态；提前标“失败”会让 list 消费者读取不存在的目标，也允许新的导入与回滚竞争。用真实 rename 屏障复现并修复，见 [失败状态顺序 case](cases/2026-11-02-voice-import-failure-order.md)。

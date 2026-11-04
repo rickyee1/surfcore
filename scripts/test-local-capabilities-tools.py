@@ -456,14 +456,33 @@ class Tools(unittest.TestCase):
         self.assertNotIn('DO_NOT_ECHO',json.dumps(result))
 
     def test_fixed_explorer_adapter_arguments_without_launch(self):
-        with patch('tool_broker.subprocess.Popen') as launch:
-            launch.return_value.wait.return_value=0
-            result=self.run_tool('local.open_directory',self.file_args(''))
-        self.assertEqual(result['state'],'succeeded')
-        args,kwargs=launch.call_args
-        self.assertEqual(Path(args[0][0]).name.lower(),'explorer.exe')
-        self.assertEqual(args[0][1],str(self.files))
-        self.assertIs(kwargs['shell'],False)
+        for outcome in (0, 1, subprocess.TimeoutExpired('explorer fixture', 3), RuntimeError('SECRET_DO_NOT_ECHO')):
+            with self.subTest(outcome=type(outcome).__name__ if isinstance(outcome, Exception) else outcome):
+                with patch('tool_broker.subprocess.Popen') as launch:
+                    if isinstance(outcome, RuntimeError):
+                        launch.side_effect=outcome
+                    elif isinstance(outcome, Exception):
+                        launch.return_value.wait.side_effect=outcome
+                    else:
+                        launch.return_value.wait.return_value=outcome
+                    result=self.run_tool('local.open_directory',self.file_args(''))
+                    self.assertEqual(result['state'],'succeeded' if outcome == 0 else 'unknown')
+                    self.assertEqual(result['error_code'],None if outcome == 0 else 'OUTCOME_UNKNOWN')
+                    if outcome != 0:
+                        self.assertIn('结果不明',result['error'])
+                        self.assertIn('可能已经生效',result['error'])
+                        self.assertIn('核对目标窗口',result['hint'])
+                        self.assertIn('不要重放',result['hint'])
+                        self.assertNotIn('SECRET_DO_NOT_ECHO',json.dumps(result))
+                    repeated=self.good(self.call('tool.execute',dict(execution_id=result['execution_id']),self.pet))
+                    self.assertEqual(repeated,result)
+                    launch.assert_called_once()
+                    args,kwargs=launch.call_args
+                    self.assertEqual(Path(args[0][0]).name.lower(),'explorer.exe')
+                    self.assertEqual(args[0][1],str(self.files))
+                    self.assertIs(kwargs['shell'],False)
+                    if not isinstance(outcome, RuntimeError):
+                        launch.return_value.wait.assert_called_once_with(timeout=3)
 
     def test_export_exact_result_target_and_host_only_one_time_consumption(self):
         result=self.run_tool('notes.create',dict(title='t',text='synthetic EXPORT-ONLY'))

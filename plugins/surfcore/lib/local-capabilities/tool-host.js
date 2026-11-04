@@ -248,7 +248,12 @@ export function createToolHost({ capabilities, ctx, stateFile = null, tokenBudge
           catch (error) { if (error.code !== 'SERVICE_UNAVAILABLE') job.executionInFlight = false; if (error.code === 'CONFIRMATION_REQUIRED') return; throw error; }
         }
         if (job.execution.state === 'running') { job.state = 'running'; return; }
-        if (job.execution.state !== 'succeeded') throw fail(job.execution.error_code || 'TOOL_EXECUTION_FAILED', '本机工具未成功完成，结果不会重放。');
+        if (job.execution.state !== 'succeeded') {
+          const unknown = job.execution.state === 'unknown';
+          throw fail(job.execution.error_code || (unknown ? 'OUTCOME_UNKNOWN' : 'TOOL_EXECUTION_FAILED'),
+            job.execution.error || (unknown ? '本机工具执行结果不明，操作可能已经生效。' : '本机工具未成功完成，结果不会重放。'),
+            job.execution.hint || (unknown ? '请人工核对目标窗口或实际结果；不要重放旧执行，以免重复操作。' : undefined));
+        }
         if (!job.execution.local_only && job.execution.tool_id === 'time.now') {
           const utc = job.execution.result?.utc;
           if (typeof utc !== 'string' || utc.length > 100) throw fail('TOOL_RESULT_INVALID', '公开时间结果无效。');
@@ -278,7 +283,7 @@ export function createToolHost({ capabilities, ctx, stateFile = null, tokenBudge
         await validate(job); await send(job, answer, true);
       }
     } catch (error) {
-      job.state = job.state === 'unknown' || job.consumeAttempted || job.sendAttempted || job.executionInFlight || job.execution?.state === 'running' ? 'unknown' : 'failed';
+      job.state = job.state === 'unknown' || job.consumeAttempted || job.sendAttempted || job.executionInFlight || ['running', 'unknown'].includes(job.execution?.state) ? 'unknown' : 'failed';
       job.error = error instanceof CapabilityError ? error.toJSON() : fail('TOOL_HOST_FAILED', '本机工具续接失败，没有自动重试。').toJSON(); lastError = job.error;
       if (job.consumeAttempted) await finalize(job, 'unknown');
       cleanup(job); update(job);

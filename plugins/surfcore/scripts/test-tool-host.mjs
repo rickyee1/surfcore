@@ -12,6 +12,7 @@ import { createChannelHandler } from '../lib/local-capabilities/channel.js';
 
 const repo = path.resolve(import.meta.dirname, '../../..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'surfcore-tool-host-'));
+console.log(`fixture root: ${temp}`);
 process.env.DSH_HOME = path.join(temp, 'dsh');
 const fixtureQqRoot = path.join(temp, 'qq'); fs.mkdirSync(path.join(fixtureQqRoot, 'src'), { recursive: true });
 fs.writeFileSync(path.join(fixtureQqRoot, 'src/bridge.js'), '// root identity fixture only'); fs.writeFileSync(path.join(fixtureQqRoot, 'config.json'), '{}');
@@ -20,9 +21,9 @@ const { createPetChatService } = await import('../lib/pet-chat.js');
 const { createPetApiService } = await import('../lib/pet-api.js');
 const { LocalChannelBridge } = await import('../../../src/local-capabilities-bridge.js');
 const { bridgeHarness } = await import('../../../scripts/audit-bridge-harness.mjs');
-// Only this disposable child's OS-lock observation is synthetic. No product bypass.
+// Disposable child only: synthetic OS-lock observation and fail-closed GUI launch blocker. No product bypass.
 const entry = path.join(temp, 'synthetic-server.py');
-fs.writeFileSync(entry, `import sys\nsys.path.insert(0,${JSON.stringify(path.join(repo, 'services/local-capabilities'))})\nimport tool_broker\ntool_broker.lockscreen_state=lambda:'unlocked'\nimport server\nserver.main()\n`);
+fs.writeFileSync(entry, `import sys\nsys.path.insert(0,${JSON.stringify(path.join(repo, 'services/local-capabilities'))})\nimport tool_broker\ndef deny_gui_launch(*args, **kwargs):\n    raise RuntimeError('GUI process launch forbidden in tool-host fixture')\ntool_broker.subprocess.Popen=deny_gui_launch\ntool_broker.lockscreen_state=lambda:'unlocked'\nimport server\nserver.main()\n`);
 const supervisor = new CapabilitySupervisor({ python: path.join(repo, '.venv/Scripts/python.exe'), entry, dataDir: path.join(temp, 'data'), env: { SURFCORE_LOCAL_KEY: crypto.randomBytes(32).toString('hex') } });
 let character = { id: 'tool-host-0', epoch: 0 }; let sequence = 0;
 const local = new LocalCapabilities({ supervisor, stateFile: path.join(temp, 'backend.json'), currentCharacter: () => character });
@@ -129,6 +130,44 @@ try {
   await check('QQ group/stranger cannot borrow owner memory or model tool authority', async () => {
     await reset(); for (const channel of [{ kind: 'qq-group', account: '999', peer: '123', principal: '123' }, { ...owner, peer: '456', principal: '456' }]) await rejects(run('现在几点', channel), 'PERMISSION_DENIED'); assert.equal(modelCalls.length, 0);
     const result = await run('现在几点', owner); await waitState('sent', result.continuationId); assert.equal(deliveries.length, 1);
+  });
+  await check('broker terminal outcomes preserve unknown and actionable metadata without export, reply or replay', async () => {
+    for (const route of ['tool.status', 'tool.execute']) for (const state of ['unknown', 'failed', 'cancelled']) {
+      await reset();
+      const directory = path.join(temp, `open-outcome-${sequence}`); fs.mkdirSync(directory);
+      fs.writeFileSync(path.join(directory, 'sample.txt'), 'synthetic window target');
+      const root = await local.management('tool.roots.register', { path: directory, label: 'synthetic outcome' });
+      proposal = { tool_id: 'local.open_directory', action: 'open', arguments: { root_id: root.root_id, relative_path: '' } };
+      const ref = incoming(`请打开目录 ${root.root_id}`);
+      const method = supervisor.raw;
+      let terminal = null; let executeOutcomes = 0;
+      // Install before handle: even its detached first step cannot reach Explorer.
+      supervisor.raw = async (...args) => {
+        if (args[0] === 'tool.execute') {
+          ops.push(args[0]);
+          if (!terminal || route !== 'tool.execute') throw new CapabilityError('CONFIRMATION_REQUIRED', 'synthetic awaiting confirmation');
+          executeOutcomes++; return terminal;
+        }
+        if (args[0] === 'tool.status' && terminal && route === 'tool.status') { ops.push(args[0]); return terminal; }
+        return method(...args);
+      };
+      try {
+        const result = await host.handle(ref, { deliver });
+        assert.equal(result.state, 'awaiting_confirmation');
+        await confirmExecution(result.executionId);
+        const execution = await local.call(pet, 'tool.status', { execution_id: result.executionId });
+        terminal = { ...execution, state, error_code: state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'REQUEST_CANCELLED', error: state === 'unknown' ? '本机工具执行结果不明，操作可能已经生效。' : '本机工具未完成。', hint: state === 'unknown' ? '请人工核对目标窗口或实际结果；不要重放旧执行，以免重复操作。' : '核验当前目标和权限。', result_id: null };
+        const job = await waitState(state === 'unknown' ? 'unknown' : 'failed', result.continuationId);
+        assert.equal(job.code, terminal.error_code); assert.equal(job.error, terminal.error); assert.equal(job.hint, terminal.hint);
+        assert.equal(host.status().pending, 0);
+        const before = ops.length; await host.poll(); await host.poll();
+        assert.equal(ops.length, before);
+        assert.equal((await host.handle(ref, { deliver })).state, 'duplicate');
+        assert.equal(modelCalls.length, 1); assert.equal(deliveries.length, 0);
+        assert.ok(!ops.some(op => op.startsWith('tool.result.export') || op === 'tool.destinations.register'));
+        assert.equal(executeOutcomes, route === 'tool.execute' ? 1 : 0);
+      } finally { supervisor.raw = method; }
+    }
   });
   await check('private notes waits for exact action and export approval; model sees only approved result, no recalled memory', async () => {
     await reset(); const context = await local.context(pet); await local.ingest(context, 'synthetic-user-context', 'PRIVATE_MEMORY_NEVER_MODEL', { actor: 'user' }); ops = [];
