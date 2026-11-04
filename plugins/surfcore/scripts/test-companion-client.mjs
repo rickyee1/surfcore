@@ -54,13 +54,13 @@ try {
   await check('first render loads status only; default closed and safe controls disabled', async () => {
     render(); assert.equal(button('立即运行').props.disabled, true); await tick();
     assert.match(words(tree), /已关闭/); assert.equal(requests.length, 1); assert.equal(requests[0].method, 'GET');
-    assert.equal(input('浏览间隔（分钟）').props.value, 60); assert.equal(input('每天最多主动尝试').props.value, 4); assert.equal(input('联系冷却（分钟）').props.value, 90);
+    assert.equal(input('浏览间隔（分钟）').props.value, 60); assert.equal(input('每日主动额度').props.value, 4); assert.equal(input('联系冷却（分钟）').props.value, 90);
     assert.equal(button('立即运行').props.disabled, true); assert.equal(button('停止并关闭').props.disabled, true); capture('default disabled');
     assert.match(words(tree), /无需空闲30分钟.*正在对话时暂停.*新消息会取消旧想法/);
   });
   await check('explicit enable form does not execute; status polling preserves unsaved preferences', async () => {
     const enabled = all(tree).find(node => node.type === 'input' && node.props.type === 'checkbox'); enabled.props.onChange({ target: { checked: true } });
-    input('浏览间隔（分钟）').props.onChange({ target: { value: '120' } }); input('每天最多主动尝试').props.onChange({ target: { value: '2' } }); input('联系冷却（分钟）').props.onChange({ target: { value: '120' } });
+    input('浏览间隔（分钟）').props.onChange({ target: { value: '120' } }); input('每日主动额度').props.onChange({ target: { value: '2' } }); input('联系冷却（分钟）').props.onChange({ target: { value: '120' } });
     render(); assert.match(words(tree), /保存并启用（仅主人私聊）/); assert.match(words(tree), /已关闭/);
     await timers[0](); await tick(); assert.equal(input('浏览间隔（分钟）').props.value, 120); assert.equal(requests.filter(r => r.method === 'POST').length, 0);
   });
@@ -68,7 +68,7 @@ try {
     await button('保存并启用').props.onClick(); render();
     const saved = requests.findLast(r => r.url.endsWith('/config'));
     assert.equal(saved.method, 'POST'); assert.deepEqual(saved.body, { enabled: true, intervalMinutes: 120, dailyMax: 2, cooldownMinutes: 120 });
-    assert.match(words(tree), /只向绑定主人私聊/); assert.match(words(tree), /统一注意力.*主动联系开关/); assert.match(words(tree), /安静时段、专注、冷却、预算和主人白名单始终生效/);
+    assert.match(words(tree), /通过所选载体联系主人/); assert.match(words(tree), /限制来自统一注意力账本/); assert.match(words(tree), /手动运行同样遵守安静、专注、前台、预算和冷却/);
     assert.ok(all(tree).some(node => node.type === 'a' && node.props.href === '/dsh-surfcore/local-capabilities')); assert.equal(button('立即运行').props.disabled, false); capture('enabled with explicit scope');
   });
   await check('public preview calls only POST preview and shows actual metadata basis with canonical source link', async () => {
@@ -125,7 +125,10 @@ try {
     assert.ok(requests.every(r => r.url.endsWith('/status') ? r.method === 'GET' : r.method === 'POST'));
     assert.ok(!all(tree).filter(node => node.type?.name === 'Btn').some(node => /发布|评论|动态|群聊/.test(words(node))));
     const code = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'); const bili = code.slice(code.indexOf('function BiliTab('), code.indexOf('function BiliTab(') + 18000);
-    assert.match(bili, /h\(CompanionCard\)/); assert.equal(all(tree).find(node => node.props.className === 'qbw-card').props.style.width, '100%');
+    assert.doesNotMatch(bili, /h\(CompanionCard\)/); assert.match(bili, /统一在「目的」页/);
+    const purpose = client.__test.PurposeTab({ overview: { purposeBackend: 'local' } });
+    assert.equal(purpose.type, client.__test.CompanionCard); assert.equal(purpose.props.endpoint, '/purpose');
+    assert.equal(all(tree).find(node => node.props.className === 'qbw-card').props.style.width, '100%');
   });
   const evidence = path.resolve(import.meta.dirname, '../../../.local/evidence/t1u-companion-rendered-tree.json'); fs.mkdirSync(path.dirname(evidence), { recursive: true }); fs.writeFileSync(evidence, JSON.stringify({ kind: 'actual component rendered with mock React hooks; not browser screenshot', checks: count, scenarios: artifacts }, null, 2));
 } finally { for (const value of slots) value?.cleanup?.(); globalThis.fetch = actualFetch; globalThis.setInterval = actualSetInterval; globalThis.clearInterval = actualClearInterval; globalThis.setTimeout = actualSetTimeout; }

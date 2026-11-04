@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from storage import ServiceError
 
 SCHEMA = '''
+CREATE TABLE IF NOT EXISTS purpose_replay(character TEXT NOT NULL,kind TEXT NOT NULL,digest TEXT NOT NULL,outcome TEXT NOT NULL,
+ PRIMARY KEY(character,kind,digest));
 CREATE TABLE IF NOT EXISTS portable_revision(character TEXT PRIMARY KEY,revision INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS portable_events(character TEXT NOT NULL,event_key TEXT NOT NULL,dedupe TEXT NOT NULL,
  created_ms INTEGER NOT NULL,outcome TEXT NOT NULL,charged INTEGER NOT NULL,PRIMARY KEY(character,event_key));
@@ -60,8 +62,27 @@ def merge_event(first, second):
     return dict(first, charged=charged, outcome=outcome)
 
 
+def validate_purpose(value):
+    exact(value, 'terminals bodyHashes')
+    if not isinstance(value['terminals'], dict) or len(value['terminals']) > 10000 or not isinstance(value['bodyHashes'], list) or len(value['bodyHashes']) > 10000:
+        raise ServiceError('INVALID_REQUEST', '目的防重放摘要超过上限。')
+    for key, outcome in value['terminals'].items():
+        identity(key, True)
+        if outcome not in ('unknown', 'done', 'consumed'):
+            raise ServiceError('INVALID_REQUEST', '目的终态无效。')
+    for key in value['bodyHashes']:
+        identity(key, True)
+    if len(set(value['bodyHashes'])) != len(value['bodyHashes']):
+        raise ServiceError('INVALID_REQUEST', '目的正文摘要重复。')
+    return value
+
+
 def validate_summary(value, now_ms):
-    exact(value, 'schema sourceTimezone capturedAt attentionRevision unanswered intensity events')
+    if isinstance(value, dict) and 'purpose' in value:
+        validate_purpose(value['purpose'])
+        exact({key: item for key, item in value.items() if key != 'purpose'}, 'schema sourceTimezone capturedAt attentionRevision unanswered intensity events')
+    else:
+        exact(value, 'schema sourceTimezone capturedAt attentionRevision unanswered intensity events')
     if value['schema'] != 1 or value['sourceTimezone'] not in ('UTC', 'Asia/Shanghai'):
         raise ServiceError('INVALID_REQUEST', '主动摘要版本或时区不支持。')
     for field in ('capturedAt', 'attentionRevision', 'unanswered'):
@@ -90,7 +111,7 @@ class PortableState:
         self.service, self.db = service, service.db
         self.token = uuid.uuid4().hex + uuid.uuid4().hex
         self.db.executescript(SCHEMA)
-        for table in ('attention', 'outreach'):
+        for table in ('attention', 'outreach', 'purpose_replay'):
             for action in ('INSERT', 'UPDATE', 'DELETE'):
                 row = 'OLD' if action == 'DELETE' else 'NEW'
                 self.db.execute(f'''CREATE TRIGGER IF NOT EXISTS portable_{table}_{action.lower()}
@@ -108,6 +129,15 @@ class PortableState:
     def revision(self, character):
         row = self.db.execute('SELECT revision FROM portable_revision WHERE character=?', (character,)).fetchone()
         return row[0] if row else 0
+
+    def purpose(self, character):
+        terminals, bodies = {}, []
+        for row in self.db.execute('SELECT * FROM purpose_replay WHERE character=? ORDER BY digest', (character,)):
+            if row['kind'] == 'terminal':
+                terminals[row['digest']] = row['outcome']
+            else:
+                bodies.append(row['digest'])
+        return validate_purpose(dict(terminals=terminals, bodyHashes=bodies))
 
     def native_events(self, character):
         lineage = self.db.execute("SELECT value FROM sovereignty.metadata WHERE key='lineage'").fetchone()[0]
@@ -140,6 +170,7 @@ class PortableState:
         result = dict(schema=1, sourceTimezone=config['timezone'], capturedAt=round(self.service.clock() * 1000),
                       attentionRevision=self.revision(character), unanswered=row['unanswered'] if row else 0,
                       intensity=row['intensity'] if row else 1, events=sorted(values.values(), key=lambda event: event['eventKey']))
+        result['purpose'] = self.purpose(character)
         return validate_summary(result, result['capturedAt'])
 
     def attention_reason(self, session, identifier, config, state, owned):
@@ -179,6 +210,17 @@ class PortableState:
                             (merged['outcome'], int(merged['charged']), character, event['dedupeDigest']))
             self.db.execute('INSERT INTO portable_events VALUES(?,?,?,?,?,?) ON CONFLICT(character,event_key) DO UPDATE SET outcome=excluded.outcome,charged=excluded.charged',
                             (character, event['eventKey'], event['dedupeDigest'], event['createdUtcMs'], merged['outcome'], int(merged['charged'])))
+        replay = summary.get('purpose', dict(terminals={}, bodyHashes=[]))
+        existing = self.purpose(character)
+        terminals = dict(existing['terminals'])
+        for key, outcome in replay['terminals'].items():
+            previous = terminals.get(key)
+            terminals[key] = 'unknown' if 'unknown' in (previous, outcome) else 'done' if 'done' in (previous, outcome) else 'consumed'
+        bodies = sorted(set(existing['bodyHashes']) | set(replay['bodyHashes']))
+        validate_purpose(dict(terminals=terminals, bodyHashes=bodies))
+        for key, outcome in terminals.items():
+            self.db.execute("INSERT INTO purpose_replay VALUES(?,'terminal',?,?) ON CONFLICT(character,kind,digest) DO UPDATE SET outcome=excluded.outcome", (character, key, outcome))
+        self.db.executemany("INSERT OR IGNORE INTO purpose_replay VALUES(?,'body',?,'consumed')", [(character, key) for key in bodies])
         self.db.execute('INSERT OR IGNORE INTO attention(character,config) VALUES(?,?)', (character, encode(DEFAULT_ATTENTION)))
         row = self.db.execute('SELECT * FROM attention WHERE character=?', (character,)).fetchone()
         config = json.loads(row['config']); config['enabled'] = False

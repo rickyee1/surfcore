@@ -63,13 +63,15 @@ export class LocalChannelBridge {
     if (!/^\d{1,20}$/.test(account) || !/^\d{1,20}$/.test(peer) || !id) throw channelError('BINDING_INVALID', '可信主人入站缺少账号、发送者或消息标识。');
     let activity = this.ownerActivity;
     if (!activity || activity.account !== account || activity.peer !== peer) {
-      activity = { account, peer, revision: 0, receivedAt: 0, lastSentAt: 0, processing: 0, seen: new Set() };
+      activity = { account, peer, revision: 0, sequence: 0, receivedAt: 0, lastSentAt: 0, processing: 0, seen: new Set() };
       this.ownerActivity = activity;
     }
     if (activity.seen.has(id)) return { duplicate: true };
     activity.seen.add(id);
     if (activity.seen.size > 10000) activity.seen.delete(activity.seen.values().next().value);
+    for (const record of this.sessions.values()) if (record.key === key) record.outputController?.abort();
     activity.revision = ++this.activityRevision;
+    activity.sequence++;
     activity.receivedAt = Date.now();
     activity.processing++;
     for (const record of [...this.sessions.values()]) if (record.intent && record.key === key) this.revokeRecord(record, { reason: 'COMPANION_ACTIVITY_CHANGED' });
@@ -80,15 +82,18 @@ export class LocalChannelBridge {
     const value = this.ownerActivity;
     if (!value || value.account !== channel?.account || value.peer !== channel?.peer) return null;
     const foreground = value.processing > 0 || [...this.sessions.values()].some(record => !record.proactive && !record.revoked && !record.writerReleased && record.channel.account === value.account && record.channel.peer === value.peer);
-    return { epoch: this.activityEpoch, account: value.account, peer: value.peer, revision: value.revision, receivedAt: value.receivedAt, lastSentAt: value.lastSentAt, foreground };
+    return { epoch: this.activityEpoch, account: value.account, peer: value.peer, revision: value.revision, sequence: value.sequence, receivedAt: value.receivedAt, lastSentAt: value.lastSentAt, foreground };
   }
   assertActivity(snapshot, channel) {
     const current = this.activity(channel);
-    if (!snapshot || !current || current.epoch !== snapshot.epoch || current.account !== snapshot.account || current.peer !== snapshot.peer || current.revision !== snapshot.revision || current.foreground || this.channels.get(`private:${channel.peer}`)?.account !== channel.account || String(this.config().ownerQQ) !== channel.peer) throw channelError('COMPANION_ACTIVITY_CHANGED', '主人活动或身份已变化，旧主动候选已取消。', '等待当前对话结束；下一轮重新形成想法，不会补发旧正文。');
+    if (!snapshot || !current || current.epoch !== snapshot.epoch || current.account !== snapshot.account || current.peer !== snapshot.peer || current.revision !== snapshot.revision || current.sequence !== snapshot.sequence || current.foreground || this.channels.get(`private:${channel.peer}`)?.account !== channel.account || String(this.config().ownerQQ) !== channel.peer) throw channelError('COMPANION_ACTIVITY_CHANGED', '主人活动或身份已变化，旧主动候选已取消。', '等待当前对话结束；下一轮重新形成想法，不会补发旧正文。');
   }
   noteConfirmedSend(record) {
     const activity = this.ownerActivity;
-    if (activity?.account === record.channel.account && activity.peer === record.channel.peer) activity.lastSentAt = Date.now();
+    if (activity?.account === record.channel.account && activity.peer === record.channel.peer) {
+      activity.lastSentAt = Date.now(); activity.sequence++;
+      record.confirmedActivity = { epoch: this.activityEpoch, sequence: activity.sequence, at: activity.lastSentAt };
+    }
   }
   assertReady(captured = this.packageRole) {
     const current = this.currentCharacter();
@@ -298,7 +303,11 @@ export class LocalChannelBridge {
     // Protect the input context->ingest window too: a background commit here
     // must not make a newly arrived ordinary message fail as stale.
     const ingress = { key, channel, eventId };
-    const ctx = await this.request('turn.begin', channel, { query: '', eventId, text: String(text).slice(0, 16000) }, { owner: ingress });
+    const replySegment = Array.isArray(event.message) ? event.message.find(segment => segment?.type === 'reply') : null;
+    const replyTo = replySegment?.data?.id == null ? null : String(replySegment.data.id);
+    const inputActivity = this.activity(channel);
+    const ctx = await this.request('turn.begin', channel, { query: '', eventId, text: String(text).slice(0, 16000), replyTo,
+      conversationEpoch: inputActivity?.epoch, sequence: inputActivity?.sequence }, { owner: ingress });
     ingress.context = ctx.context;
     ingress.allocation ||= [...this.allocations].find(turn => turn.context === ctx.context);
     if (ingress.allocation) ingress.allocation.owner = ingress;
@@ -355,7 +364,7 @@ export class LocalChannelBridge {
       else if (cleanup.ok === false) outcome.cleanup = { ...cleanup };
     }
   }
-  async prepare(key, sessionId, token, persona = '', { signal, onNotice } = {}) {
+  async prepare(key, sessionId, token, persona = '', { signal, onNotice, personaCheck, personaMode = 'v1' } = {}) {
     this.assertReady();
     const generation = this.generation;
     const channel = this.channels.get(key);
@@ -381,10 +390,11 @@ export class LocalChannelBridge {
       return result;
     };
     const check = () => {
+      personaCheck?.();
       this.assertScope(generation, key, channel);
       if (combined.aborted || (this.inputRevisions.get(key) || 0) !== inputRevision) throw channelError('REQUEST_CANCELLED', '原提示准备已由新的入站或停止操作取消。');
     };
-    const ctx = await request('turn.begin', { query: '' }).catch(error => {
+    const ctx = await request('turn.begin', { query: '', persona, personaMode }).catch(error => {
       if (signal?.aborted) this.discardInputs(key, pending);
       if (this.preparations.get(sessionId) === preparation) this.preparations.delete(sessionId);
       throw error;
@@ -503,6 +513,7 @@ export class LocalChannelBridge {
     const preparation = this.preparations.get(id);
     preparation?.controller.abort();
     const record = this.sessions.get(id);
+    record?.outputController?.abort();
     const work = [];
     if (record || preparation) work.push(this.releaseRecord(record || preparation, { retry }));
     for (const allocation of this.allocations) if (allocation.sessionId === id) work.push(this.cancelAllocation(allocation, { retry }));
@@ -598,9 +609,11 @@ export class LocalChannelBridge {
       this.assertActivity(activity, channel);
       record = { key, channel, context: claim.context, sessionId: `companion:${intentId}`, generation, proactive: true, outreachId: claim.outreachId, intent: true, activity, syncGuard: () => syncGuard?.(channel), expiresAt: claim.expiresAt, guard: () => guard(channel) };
       this.sessions.set(record.sessionId, record);
-      return await this.origin.run(record, () => deliver(claim.text, key));
+      const delivery = await this.origin.run(record, () => deliver(claim.text, key));
+      return { ...delivery, purposeReceipt: record.confirmedActivity || null };
     } catch (error) {
       error.deliveryOutcome = record?.transportAttempted && error.deliveryOutcome !== 'failed' ? 'unknown' : 'failed';
+      error.transportAttempted = record?.transportAttempted === true;
       if (claim) await this.request('intent.finish', channel, { context: claim.context, params: { outcome: error.deliveryOutcome } }).catch(() => {});
       throw error;
     } finally { if (record && this.sessions.get(record.sessionId) === record) this.sessions.delete(record.sessionId); }
@@ -625,7 +638,29 @@ export class LocalChannelBridge {
     if (record.semanticNotice && (record.semanticNotice.combined.aborted || (this.inputRevisions.get(record.key) || 0) !== record.semanticNotice.inputRevision)) throw channelError('REQUEST_CANCELLED', '原语义准备通知已失效。');
     if (record.intent) { this.assertActivity(record.activity, record.channel); record.syncGuard(); }
   }
-  async send(key, deliver) {
+  completeOutput(id) {
+    const record = this.sessions.get(id);
+    if (!record || record.proactive || record.toolDelivery || record.semanticNotice || record.channel.kind !== 'qq-private') return Promise.resolve({ ok: true, skipped: true });
+    if (record.outputCommit) return record.outputCommit;
+    const bubbles = record.outputBubbles || [];
+    record.outputController = new AbortController();
+    record.outputCommit = (async () => {
+      try {
+        this.assertRecord(record);
+        if (record.uncertain || record.inFlight || record.outputIneligible || !bubbles.length || bubbles.length !== record.outputAttempts || bubbles.filter(Boolean).length !== record.outputAttempts) return { ok: true, skipped: true };
+        const text = bubbles.join('\n\n');
+        if (text.length > 12000) throw channelError('ASSISTANT_MEMORY_TOO_LONG', '整轮已送输出超过记忆上限，未截断保存。', '已送消息无需重发；可在记忆管理页核对。');
+        const signal = AbortSignal.any([record.outputController.signal, ...(record.prepareSignal ? [record.prepareSignal] : [])]);
+        const result = await this.request('turn.output', record.channel, { context: record.context, eventId: record.sessionId, text }, { signal });
+        return { ok: true, ...result };
+      } catch (error) {
+        return { ok: false, code: error.code || 'ASSISTANT_MEMORY_FAILED', error: error.message || '已送输出记忆提交失败。', hint: error.hint || '消息已送达，请在本地记忆页核对；不要重发平台消息。' };
+      } finally { record.outputBubbles = []; }
+    })();
+    return record.outputCommit;
+  }
+  async completeOriginOutput() { return this.completeOutput(this.origin.getStore()?.sessionId); }
+  async send(key, deliver, outputText) {
     this.assertReady();
     if (!this.guarded()) {
       if (this.origin.getStore()) throw channelError('STALE_CHARACTER', '旧本地能力回合不能在切换后的角色或后端发送。');
@@ -635,6 +670,8 @@ export class LocalChannelBridge {
     if (!record || record.key !== key || this.sessions.get(record.sessionId) !== record) throw channelError('BINDING_INVALID', '发送缺少本轮可信上下文或试图跨会话发送。');
     if ((record.intent || record.toolDelivery) && record.consumed) throw channelError('DELIVERY_UNKNOWN', '本次投递已消费，不能重发。');
     if (record.intent || record.toolDelivery) record.consumed = true;
+    const outputIndex = record.proactive || record.toolDelivery || record.semanticNotice ? null : (record.outputAttempts || 0);
+    if (outputIndex !== null) record.outputAttempts = outputIndex + 1;
     const extra = { context: record.context };
     if (record.uncertain) throw channelError('DELIVERY_UNKNOWN', '本轮存在无法确认的发送，禁止补发或备用路径。');
     await this.request('validate', record.channel, extra);
@@ -643,7 +680,12 @@ export class LocalChannelBridge {
       this.assertRecord(record); // last synchronous gate after every awaited check
       record.transportAttempted = true;
       record.inFlight = (record.inFlight || 0) + 1;
-      try { const result = await deliver(); record.confirmedSends = (record.confirmedSends || 0) + 1; record.inputs = []; this.noteConfirmedSend(record); return result; }
+      try { const result = await deliver();
+        if (!record.toolDelivery && !record.semanticNotice) {
+          if (typeof outputText === 'string' && outputText.trim()) (record.outputBubbles ||= [])[outputIndex] = outputText;
+          else record.outputIneligible = true;
+        }
+        record.confirmedSends = (record.confirmedSends || 0) + 1; record.inputs = []; this.noteConfirmedSend(record); return result; }
       catch (error) { record.uncertain = true; throw error; }
       finally { record.inFlight--; }
     }
@@ -679,12 +721,21 @@ export class LocalChannelBridge {
   }
   async sendFetch(key, url, options) {
     if (!this.guarded()) return this.send(key, () => this.fetchImpl(url, options));
+    let outputText;
+    try {
+      const payload = JSON.parse(options.body);
+      if (payload.memory_write !== false && !payload.localOnly) {
+        const message = payload.message;
+        if (typeof message === 'string') outputText = message;
+        else if (Array.isArray(message) && message.every(part => part.type === 'text')) outputText = message.map(part => part.data?.text || '').join('');
+      }
+    } catch {}
     return this.send(key, async () => {
       const res = await this.fetchImpl(url, options);
       const body = await res.clone().json().catch(() => null);
       if (body?.status === 'failed' && Number.isInteger(body.retcode) && body.retcode !== 0) throw Object.assign(channelError('DELIVERY_REJECTED', 'QQ 平台明确拒绝了本次发送。'), { deliveryOutcome: 'failed' });
       if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) throw channelError('DELIVERY_UNKNOWN', 'QQ 发送未获得成功回执，已保守计账，不会补发。');
       return res;
-    });
+    }, outputText);
   }
 }

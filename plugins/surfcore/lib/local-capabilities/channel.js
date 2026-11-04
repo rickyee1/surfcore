@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { CapabilityError, errorResult } from './supervisor.js';
 
-export function createChannelHandler({ capabilities, keyFile }) {
+export function createChannelHandler({ capabilities, keyFile, getPersona }) {
   fs.mkdirSync(path.dirname(keyFile), { recursive: true });
   // Only the plugin owns this credential; neither the browser nor model sees it.
   let key;
@@ -61,8 +61,9 @@ export function createChannelHandler({ capabilities, keyFile }) {
     if (!await intent.active()) throw new CapabilityError('COMPANION_STOPPED', '主动轮次已停用或过期。', '重新预览并发起新的轮次。');
     const owner = capabilities.state.qqOwner;
     if (!owner || owner.account !== intent.channel.account || owner.peer !== intent.channel.peer) throw new CapabilityError('BINDING_INVALID', '主人绑定已变化，旧轮次已取消。');
-    await capabilities.validate(intent.publicContext);
-    await capabilities.validate(intent.ownerContext);
+    for (const context of intent.contexts) { await capabilities.validate(context); intent.syncGuard(); }
+    if (intent.validateSources) await intent.validateSources();
+    intent.syncGuard();
     checkIntentExpiry(intent);
   }
   const handler = async (req, res) => {
@@ -131,6 +132,9 @@ export function createChannelHandler({ capabilities, keyFile }) {
           : null;
         pendingTurn = writerTurn;
         let toolInput;
+        if (data.action === 'turn.begin' && typeof data.eventId === 'string' && data.eventId.length <= 500)
+          handler.onInput?.({ channel: trusted, eventId: data.eventId, replyTo: typeof data.replyTo === 'string' ? data.replyTo : null,
+            conversationEpoch: data.conversationEpoch, sequence: data.sequence });
         if (data.action === 'turn.begin' && data.eventId !== undefined && capabilities.toolHost) {
           await capabilities.binding(trusted);
           toolInput = capabilities.toolHost.input(trusted, { eventId: data.eventId, text: data.text });
@@ -143,7 +147,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
         const handle = crypto.randomBytes(24).toString('hex');
         pendingHandle = handle;
         if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
-        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn, toolInput });
+        contexts.set(handle, { context, channel: JSON.stringify(trusted), expires: Date.now() + 30 * 60000, writerTurn, toolInput, persona: typeof data.persona === 'string' ? data.persona : null, personaMode: data.personaMode });
         result = { context: handle, text: context.text, memory_epoch: context.memory_epoch, character_epoch: context.binding.character_epoch };
       } else {
         const stored = contexts.get(data.context);
@@ -170,6 +174,21 @@ export function createChannelHandler({ capabilities, keyFile }) {
           if (stored.intent || !stored.neverPersisted) throw new CapabilityError('PERMISSION_DENIED', '只可核验已登记且明确未持久化的入站来源。');
           await capabilities.validateSourceContext(stored.context);
           result = { valid: true };
+        } else if (data.action === 'turn.output') {
+          if (trusted.kind !== 'qq-private' || !stored.writerTurn?.lease || (!stored.inputSources?.length && !stored.unstoredInput) ||
+              typeof getPersona !== 'function' || stored.persona === null)
+            throw new CapabilityError('PERMISSION_DENIED', '普通输出缺少原回合、来源或人格凭据。', '核对本轮记忆结果；已送消息不会重发。');
+          if (!stored.writerTurn.outputCommit) {
+            const guard = () => {
+              if (operation.signal.aborted || disposed || stored.writerTurn.cancelled || !stored.writerTurn.lease)
+                throw new CapabilityError('REQUEST_CANCELLED', '普通输出的原回合已取消。');
+              if (getPersona(trusted, stored.personaMode) !== stored.persona)
+                throw new CapabilityError('STALE_PERSONA', '普通输出的原人格层已变化。');
+            };
+            const sources = [...new Map([...stored.inputSources, ...(stored.context.records || [])].map(source => [source.id, { id: source.id, revision: source.revision }])).values()];
+            stored.writerTurn.outputCommit = stored.unstoredInput ? Promise.resolve({ skipped: true, stored: false }) : capabilities.ingestConfirmedOutput(stored.context, `qq-output:${data.eventId}`, data.text, { sources, guard });
+          }
+          result = await stored.writerTurn.outputCommit;
         } else if (data.action === 'turn.end') {
           releaseTurn(stored.writerTurn);
           result = { released: true };
@@ -185,7 +204,8 @@ export function createChannelHandler({ capabilities, keyFile }) {
           if (projection.memory_epoch !== stored.context.memory_epoch) throw new CapabilityError('STALE_CONTEXT', '来源查询期间记忆已变更。', '重新读取本轮上下文。');
           const handle = crypto.randomBytes(24).toString('hex');
           if (contexts.size >= 1000) contexts.delete(contexts.keys().next().value);
-          contexts.set(handle, { context: { ...stored.context, memory_epoch: projection.memory_epoch }, channel: stored.channel, expires: Date.now() + 30 * 60000, writerTurn: stored.writerTurn });
+          contexts.set(handle, { ...stored, context: { ...stored.context, memory_epoch: projection.memory_epoch }, expires: Date.now() + 30 * 60000,
+            inputSources: projection.sources.filter(source => source.status === 'active'), unstoredInput: projection.sources.some(source => source.status !== 'active') });
           result = { ...projection, context: handle };
         }
         else if (data.action === 'context.refine') {
@@ -208,7 +228,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
         }
         else if (data.action === 'validate') result = { valid: true };
         else if (data.action === 'ingest') {
-          result = await capabilities.ingest(stored.context, String(data.eventId || ''), String(data.text || ''), { actor: trusted.kind.startsWith('qq-') ? 'user' : 'external' });
+          result = await capabilities.ingest(stored.context, String(data.eventId || ''), String(data.text || ''), { actor: trusted.kind.startsWith('qq-') ? 'user' : 'external', original: true });
           stored.context.memory_epoch = result.memory_epoch;
           stored.neverPersisted = result.stored === false && result.skipped === true;
         } else if (['attention.check','attention.reserve','attention.finalize','attention.respond'].includes(data.action)) {
@@ -219,7 +239,7 @@ export function createChannelHandler({ capabilities, keyFile }) {
       }
       // IPC/ledger work can outlive the validity check; expiry also gates the response.
       // Finalization intentionally has no checkedIntent and remains available after expiry.
-      if (checkedIntent) checkIntentExpiry(checkedIntent);
+      if (checkedIntent) { checkIntentExpiry(checkedIntent); checkedIntent.syncGuard(); }
       if (checkedTool) { checkedTool.envelope.syncGuard(); if (Date.now() >= checkedTool.expires) throw new CapabilityError('TOOL_DELIVERY_INVALID', '工具投递凭据已过期。'); }
       send(200, { ok: true, result });
     } catch (e) { abandon(); send(e.code === 'PERMISSION_DENIED' ? 403 : 400, errorResult(e)); }
@@ -237,11 +257,12 @@ export function createChannelHandler({ capabilities, keyFile }) {
     contexts.clear();
   };
   // Only host code can issue: HTTP has no issue/text/recipient operation.
-  handler.issueIntent = async ({ publicContext, ownerContext, channel, text, outreachId, active }) => {
+  handler.issueIntent = async ({ publicContext, ownerContext, contexts = [publicContext, ownerContext].filter(Boolean), channel, text, outreachId, active, validateSources, syncGuard = () => {} }) => {
     if (channel.kind !== 'qq-private' || typeof text !== 'string' || !text.trim() || Array.from(text).length > 800 || typeof active !== 'function') throw new CapabilityError('INVALID_REQUEST', '主动投递材料无效。');
     for (const [id, old] of intents) if (old.expires < Date.now()) intents.delete(id);
     if (intents.size >= 1000) throw new CapabilityError('COMPANION_BUSY', '主动投递记录尚未释放。');
-    const intent = { publicContext, ownerContext, channel: canonical(channel), text, outreachId, active, expires: Date.now() + 120000, status: 'issued' };
+    if (!Array.isArray(contexts) || !contexts.length || !contexts.includes(ownerContext) || typeof syncGuard !== 'function') throw new CapabilityError('INVALID_REQUEST', '主动投递必须绑定实际目的地原上下文。');
+    const intent = { contexts: [...contexts], ownerContext, channel: canonical(channel), text, outreachId, active, validateSources, syncGuard, expires: Date.now() + 120000, status: 'issued' };
     await validateIntent(intent);
     const intentId = crypto.randomBytes(24).toString('hex'); intents.set(intentId, intent);
     return intentId;

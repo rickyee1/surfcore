@@ -34,10 +34,19 @@ async function fixture({ autoWrite = false } = {}) {
   await local.management('memory.settings', { auto_write: autoWrite });
   await local.management('attention.configure', { enabled: true, daily_limit: 4, cooldown_seconds: 0, quiet_start: '', quiet_end: '', timezone: 'UTC', muted: false, focused: false });
   const state = { sends: [], delivery: 'sent', modelHook: null, modelCalls: 0 };
+  const llm = {
+    listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 'fixture', settingsPath: [] }],
+    async prepareCall(config) { return { config, async *stream(options) {
+      const call = ++state.modelCalls; await state.modelHook?.(call);
+      yield { type: 'text-delta', text: options.system.startsWith('只依据给定公开材料') ? '这个公开主题有个具体想法值得琢磨。' : '{"decision":"send","text":"刚想到这个主题，想问问你的看法。","pending":"none"}' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    } }; },
+  };
   const ctx = { get(name) {
-    if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) };
-    if (name === 'llm') return { stream() { return (async function* () { const call = ++state.modelCalls; await state.modelHook?.(call); yield { type: 'text-delta', text: call === 1 ? '这个公开主题有个具体想法值得琢磨。' : '刚想到这个主题，想问问你的看法。' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } };
-    throw new Error(`unexpected service ${name}`);
+    if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'deepseek-official', model: 'fixture' }) };
+    if (name === 'llm') return llm;
+    if (name === 'launchEnvironment') return new Map();
+    if (name === 'settings') return { describe: () => [{ ns: 'fixture', applies: 'live', revision: 1, value: { baseURL: 'https://fixture.invalid/v1' } }] };
   } };
   const tools = createToolHost({ capabilities: local, ctx, pollMs: 60000 }); local.toolHost = tools; await tools.syncPolicy();
   class NativeAdapter extends LocalChannelBridge {
@@ -62,8 +71,8 @@ async function fixture({ autoWrite = false } = {}) {
     return work.then(async () => { if (finish) await h.localChannels.endSession(h.state.sessions['private:123']); });
   };
   const ready = async () => (await callBridge('/api/companion/readiness')).data;
-  let item = createAutonomousCompanion({ ctx, capabilities: local, channelHandler: channel, stateDir: path.join(temp, `coordinator-${sequence}`), callBridge, environment: () => ({ roleActive: true, platformEnabled: true, focused: false, paused: false }), reader, purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 30 * 60000, dailyMax: 4 }) });
-  item.configure({ enabled: true });
+  let item = createAutonomousCompanion({ ctx, persona: () => ({ ...character, revision: 1, text: '' }), capabilities: local, channelHandler: channel, stateDir: path.join(temp, `coordinator-${sequence}`), callBridge, environment: () => ({ roleActive: true, platformEnabled: true, focused: false, paused: false }), reader, purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 30 * 60000, dailyMax: 4 }) });
+  await item.configure({ enabled: true });
   active = { ...state, state, h, ingress, ready, item, callBridge, async close() { active.item.dispose(); tools.dispose(); local.toolHost = null; consoleServer.closeAllConnections?.(); await new Promise(resolve => consoleServer.close(resolve)); await h.close(); active = null; } };
   return active;
 }
@@ -108,7 +117,7 @@ try {
   for (const phase of ['parse', 'ingest', 'generation', 'issued', 'claim', 'last-rpc']) for (const body of ['empty', 'text']) await check(`real ${body} owner input in ${phase} window cancels original revision even with auto_write=false; transport=0`, async () => {
     const f = await fixture(); const originalIngest = local.ingest.bind(local), originalIssue = channel.issueIntent;
     let inbound, injected = false;
-    const inject = async (wait = true) => { if (injected) return; injected = true; inbound = f.ingress(body === 'empty' ? [] : undefined).catch(error => { if (body !== 'empty') throw error; assert.equal(error.code, 'INVALID_REQUEST'); }); if (wait) await inbound; };
+    const inject = async (wait = true) => { if (injected) return; injected = true; inbound = f.ingress(body === 'empty' ? [] : undefined).catch(error => { if (body !== 'empty') throw error; assert.equal(error.code, 'INVALID_REQUEST'); }); void inbound.catch(() => {}); if (wait) await inbound; };
     try {
       await f.ingress();
       const originalRequest = f.h.localChannels.request.bind(f.h.localChannels);
@@ -118,18 +127,18 @@ try {
       if (phase === 'issued') channel.issueIntent = async (...args) => { const id = await originalIssue(...args); await inject(); return id; };
       if (phase === 'claim' || phase === 'last-rpc') f.h.localChannels.request = async (...args) => { const result = await originalRequest(...args); if ((phase === 'claim' && args[0] === 'intent.claim') || (phase === 'last-rpc' && args[0] === 'attention.check' && args[2]?.params?.reservation_id)) await inject(phase !== 'last-rpc'); return result; };
       // A separate service is needed only to inject at the real public reader boundary.
-      if (phase === 'parse') { f.item.dispose(); f.item = createAutonomousCompanion({ ctx: { get: () => { throw Error('stale round must not call model'); } }, capabilities: local, channelHandler: channel, stateDir: path.join(temp, `parse-${sequence}`), callBridge: f.callBridge, reader: phaseReader, environment: () => ({ roleActive: true, platformEnabled: true, focused: false, paused: false }), purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00' }) }); f.item.configure({ enabled: true }); }
-      await assert.rejects(f.item.run(), e => ['COMPANION_ACTIVITY_CHANGED', 'COMPANION_FOREGROUND', 'BINDING_INVALID', 'STALE_CONTEXT', 'STALE_CHARACTER'].includes(e.code) && !!e.hint, phase);
+      if (phase === 'parse') { f.item.dispose(); f.item = createAutonomousCompanion({ ctx: { get: () => { throw Error('stale round must not call model'); } }, capabilities: local, channelHandler: channel, stateDir: path.join(temp, `parse-${sequence}`), callBridge: f.callBridge, reader: phaseReader, environment: () => ({ roleActive: true, platformEnabled: true, focused: false, paused: false }), purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00' }) }); await f.item.configure({ enabled: true }); }
+      await assert.rejects(f.item.run(), e => ['COMPANION_ACTIVITY_CHANGED', 'COMPANION_FOREGROUND', 'BINDING_INVALID', 'STALE_CONTEXT', 'STALE_CHARACTER', 'HOST_SEND_BLOCKED'].includes(e.code) && !!e.hint, phase);
       await inbound; assert.equal(injected, true); assert.equal(f.state.sends.length, 0); assert.equal((await f.ready()).activity.revision, 2);
       assert.equal(f.h.localChannels.ownerActivity.lastSentAt, 0);
-    } finally { local.ingest = originalIngest; channel.issueIntent = originalIssue; await f.close(); }
+    } finally { await inbound?.catch(() => {}); local.ingest = originalIngest; channel.issueIntent = originalIssue; await f.close(); }
   });
   await check('native failed ingestion still advances activity and cancels issued intention permanently', async () => {
     const f = await fixture(), originalIssue = channel.issueIntent;
     try {
       await f.ingress(); const request = f.h.localChannels.request.bind(f.h.localChannels);
       channel.issueIntent = async (...args) => { const id = await originalIssue(...args); f.h.localChannels.request = async (...rpc) => { if (rpc[0] === 'ingest') throw Object.assign(new Error('isolated DB failure'), { code: 'SERVICE_UNAVAILABLE', hint: 'fixture' }); return request(...rpc); }; await assert.rejects(f.ingress(), e => e.code === 'SERVICE_UNAVAILABLE'); f.h.localChannels.request = request; return id; };
-      await assert.rejects(f.item.run(), e => e.code === 'COMPANION_ACTIVITY_CHANGED'); assert.equal(f.state.sends.length, 0); assert.equal((await f.ready()).activity.revision, 2);
+      await assert.rejects(f.item.run(), e => ['COMPANION_ACTIVITY_CHANGED', 'HOST_SEND_BLOCKED'].includes(e.code) && !!e.hint); assert.equal(f.state.sends.length, 0); assert.equal((await f.ready()).activity.revision, 2);
     } finally { channel.issueIntent = originalIssue; await f.close(); }
   });
   for (const change of ['identity', 'foreground', 'allowlist']) await check(`last native RPC cannot mask a synchronous ${change} change before actual transport`, async () => {
@@ -154,12 +163,12 @@ try {
     try {
       await f.ingress(); f.state.delivery = outcome;
       if (outcome === 'sent') await f.item.run(); else await assert.rejects(f.item.run());
-      assert.equal(f.state.sends.length, 1); assert.equal(f.item.status().last.outcome, outcome);
+      assert.equal(f.state.sends.length, 1); assert.equal((await f.item.status()).last.outcome, outcome);
       assert.equal((await f.ready()).activity.lastSentAt > 0, outcome === 'sent');
-      await assert.rejects(f.item.run()); assert.equal(f.state.sends.length, 1);
+      assert.equal((await f.item.run()).skipped, true); assert.equal(f.state.sends.length, 1);
       const stateFile = fs.readdirSync(path.join(temp, `coordinator-${sequence}`)).find(name => name.endsWith('.state.json'));
       const saved = JSON.parse(fs.readFileSync(path.join(temp, `coordinator-${sequence}`, stateFile), 'utf8'));
-      assert.equal(saved.purpose.lastSentAt > 0, outcome === 'sent');
+      assert.equal(saved.purpose.receipts.some(receipt => receipt.outcome === 'sent'), outcome === 'sent');
     } finally { await f.close(); }
   });
 } finally {

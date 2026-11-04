@@ -55,7 +55,24 @@ const services = [];
 let adapter; let sends = []; let modelCalls = []; let modelHook = null; let finish = 'stop'; let delivery = 'sent'; let env; let config; let gateHook = null;
 const source = { bvid: bv, title: metadata.title, author: metadata.owner.name, description: metadata.desc, subtitle: '官方字幕正文。', subtitleStatus: 'available', url: `https://www.bilibili.com/video/${bv}`, basis: '标题、简介与官方字幕；未观看画面。' };
 const reader = { feed: async ({ exclude = [] } = {}) => exclude.includes(bv) ? [] : [{ bvid: bv }], read: async () => source };
-const ctx = { get(name) { if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'fixture', model: 'fixture', apiKey: 'FAKE_SECRET_NEVER_IN_OPTIONS' }) }; if (name === 'llm') return { stream(options) { modelCalls.push(options); return (async function* () { if (modelHook) await modelHook(modelCalls.length); yield { type: 'text-delta', text: modelCalls.length % 2 ? '从字幕看，这个想法值得琢磨。' : '刚逛到一个主题，想和你聊聊字幕里的这个想法。' }; if (finish) yield { type: 'finish', reason: { kind: finish } }; })(); } }; throw new Error('unexpected private service'); } };
+const llm = {
+  listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 'fixture', settingsPath: [] }],
+  async prepareCall(config) { return { config, async *stream(options) {
+    modelCalls.push(options); if (modelHook) await modelHook(modelCalls.length);
+    const isPublic = options.system.startsWith('只依据给定公开材料');
+    const input = JSON.parse(options.messages[0].content[0].text);
+    const decision = input.materials?.some(item => item.kind === 'video' || item.kind === 'owner')
+      ? { decision: 'send', text: '刚逛到一个主题，想和你聊聊字幕里的这个想法。', pending: 'none' } : { decision: 'skip' };
+    yield { type: 'text-delta', text: isPublic ? '从字幕看，这个想法值得琢磨。' : JSON.stringify(decision) };
+    if (finish) yield { type: 'finish', reason: { kind: finish } };
+  } }; },
+};
+const ctx = { get(name) {
+  if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'deepseek-official', model: 'fixture' }) };
+  if (name === 'llm') return llm;
+  if (name === 'launchEnvironment') return new Map();
+  if (name === 'settings') return { describe: () => [{ ns: 'fixture', applies: 'live', revision: 1, value: { baseURL: 'https://fixture.invalid/v1' } }] };
+} };
 const stateDir = path.join(temp, 'coordinator');
 const callBridge = async (pathname, options) => {
   if (pathname.endsWith('/readiness')) return { ok: true, data: { ok: true, ready: true, activity: adapter.activity(adapter.channels.get('private:123')), ownerIdleMs: 100000000 } };
@@ -68,10 +85,10 @@ const callBridge = async (pathname, options) => {
       return (await res.json()).data;
     } });
     return { ok: true, data: { ok: true, delivery: { messageId: result?.message_id } } };
-  } catch (e) { return { ok: false, data: { ok: false, code: e.code, error: e.message, hint: e.hint || '本轮不会重发。' } }; }
+  } catch (e) { return { ok: false, data: { ok: false, code: e.code, attempted: e.transportAttempted === true, error: e.message, hint: e.hint || '本轮不会重发。' } }; }
 };
 function service(extra = {}) {
-  const item = createAutonomousCompanion({ ctx, capabilities: local, channelHandler: channel, stateDir, callBridge, environment: () => env, persona: () => '现有角色语气', purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 0, dailyMax: 4 }), reader, ...extra }); services.push(item); return item;
+  const item = createAutonomousCompanion({ ctx, capabilities: local, channelHandler: channel, stateDir, callBridge, environment: () => env, persona: () => ({ ...character, revision: 1, text: '现有角色语气' }), purposeConfig: () => ({ quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 0, dailyMax: 4 }), reader, ...extra }); services.push(item); return item;
 }
 async function reset() {
   for (const item of services.splice(0)) item.dispose();
@@ -93,7 +110,7 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 
   for(const input of ['', 'synthetic new input'])await check('bridge-only restart rejects old rev1 intent; new round sends: '+JSON.stringify(input),async()=>{
-    await reset();await local.management('memory.settings',{auto_write:false});const item=service();item.configure({enabled:true});const issue=channel.issueIntent;let oldActivity,newActivity,oldIntent;
+    await reset();await local.management('memory.settings',{auto_write:false});const item=service();await item.configure({enabled:true});const issue=channel.issueIntent;let oldActivity,newActivity,oldIntent;
     channel.issueIntent=async(...args)=>{
       const intent=await issue(...args);oldIntent=intent;const previous=adapter;oldActivity=previous.activity(previous.channels.get('private:123'));
       adapter=new LocalChannelBridge({config:()=>config,guarded:()=>true,mode:()=>local.mode,keyFile,fetchImpl:previous.fetchImpl,currentCharacter:previous.currentCharacter});
@@ -112,7 +129,7 @@ try {
   });
 
   for(const phase of ['claim-response','final-validation','final-response'])await check('restart across '+phase+' retains host snapshot and retires old bridge origin',async()=>{
-    await reset();await local.management('memory.settings',{auto_write:false});const item=service();item.configure({enabled:true});const originalAdapter=adapter,request=adapter.request.bind(adapter);let switched=false,reserved=false,oldRecord;
+    await reset();await local.management('memory.settings',{auto_write:false});const item=service();await item.configure({enabled:true});const originalAdapter=adapter,request=adapter.request.bind(adapter);let switched=false,reserved=false,oldRecord;
     const restart=async()=>{
       switched=true;const previous=adapter,oldActivity=previous.activity(previous.channels.get('private:123'));oldRecord=previous.origin.getStore();
       adapter=new LocalChannelBridge({config:()=>config,guarded:()=>true,mode:()=>local.mode,keyFile,fetchImpl:previous.fetchImpl,currentCharacter:previous.currentCharacter});
@@ -134,57 +151,58 @@ try {
     if(phase==='final-response'){assert.ok(oldRecord);assert.throws(()=>originalAdapter.assertRecord(oldRecord));assert.equal(originalAdapter.sessions.size,0);}
   });
   await check('default disabled; preview reads public materials without models, persistence or sending', async () => {
-    await reset(); const item = service(); assert.equal(item.status().config.enabled, false);
+    await reset(); const item = service(); assert.equal((await item.status()).config.enabled, false);
     await rejects(item.run(), 'COMPANION_DISABLED'); const result = await item.preview(); assert.equal(result.modelCalled, false); assert.equal(result.sends, false); assert.equal(sends.length, 0); assert.equal(modelCalls.length, 0);
   });
   await check('public research -> persisted sources -> purpose -> owner text -> real intent/attention/receipt chain', async () => {
-    await reset(); const item = service(); item.configure({ enabled: true });
+    await reset(); const item = service(); await item.configure({ enabled: true });
     const result = await item.run(); assert.equal(result.outcome, 'sent'); assert.equal(result.delivery.messageId, 'fixture-receipt'); assert.equal(sends.length, 1);
-    assert.equal(modelCalls.length, 2); assert.ok(!JSON.stringify(modelCalls[0]).includes('OWNER_PRIVATE_MARKER')); assert.match(JSON.stringify(modelCalls[1]), /OWNER_PRIVATE_MARKER/);
-    for (const call of modelCalls) { assert.equal(call.tools, undefined); assert.equal(call.maxTokens, 1800); assert.equal(call.reasoningEffort, 'off'); assert.ok(!JSON.stringify(call).includes('FAKE_SECRET')); }
+    assert.equal(modelCalls.length, 2); assert.ok(!JSON.stringify(modelCalls[0]).includes('OWNER_PRIVATE_MARKER')); assert.doesNotMatch(JSON.stringify(modelCalls[1]), /OWNER_PRIVATE_MARKER/); assert.match(JSON.stringify(modelCalls[1]), /现有角色语气/);
+    for (const call of modelCalls) { assert.equal(call.tools, undefined); assert.ok([1000, 1800].includes(call.maxTokens)); assert.equal(call.reasoningEffort, 'off'); assert.ok(!JSON.stringify(call).includes('FAKE_SECRET')); }
     assert.match(modelCalls[0].messages[0].content[0].text, /官方字幕/);
     const pub = await local.context({ kind: 'bili', account: 'public', peer: 'public', principal: 'public' }); assert.match(pub.text, /从字幕看/); assert.doesNotMatch(pub.text, /OWNER_PRIVATE/);
     const records = fs.readdirSync(stateDir).filter(x => x.endsWith('.state.json')).map(x => fs.readFileSync(path.join(stateDir, x), 'utf8')).join(''); assert.doesNotMatch(records, /OWNER_PRIVATE_MARKER|刚逛到一个主题/);
-    await rejects(item.run(), 'COMPANION_PURPOSE_BLOCKED'); assert.equal(sends.length, 1);
+    await local.management('attention.configure', { cooldown_seconds: 5400 });
+    await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 1);
   });
   await check('max-tokens and missing finish never dispatch partial research', async () => {
     for (const kind of ['max-tokens', null, 'tool-calls']) {
-      await reset(); const item = service(); item.configure({ enabled: true }); finish = kind;
-      await rejects(item.run(), kind === 'max-tokens' ? 'COMPANION_MODEL_TRUNCATED' : kind ? 'MODEL_UNAVAILABLE' : 'COMPANION_MODEL_INCOMPLETE'); assert.equal(sends.length, 0);
+      await reset(); const item = service(); await item.configure({ enabled: true }); finish = kind;
+      await rejects(item.run(), 'FIXED_MODEL_INCOMPLETE'); assert.equal(sends.length, 0);
     }
   });
   await check('same-character cross-instance lock prevents parallel generation and duplicate sends', async () => {
-    await reset(); const a = service(); const b = service(); a.configure({ enabled: true });
+    await reset(); const a = service(); const b = service(); await a.configure({ enabled: true });
     let release; const gate = new Promise(resolve => { release = resolve; }); modelHook = async n => { if (n === 1) await gate; };
     const first = a.run(); while (!modelCalls.length) await new Promise(resolve => setTimeout(resolve, 2));
     await rejects(b.run(), 'COMPANION_BUSY'); release(); await first; assert.equal(sends.length, 1);
   });
   await check('quiet/focus/global attention daily budget block before public research or model cost', async () => {
     for (const params of [{ focused: true }, { daily_limit: 0 }, { quiet_start: '00:00', quiet_end: '00:00' }]) {
-      await reset(); const item = service(); item.configure({ enabled: true }); await local.management('attention.configure', params);
-      await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
+      await reset(); const item = service(); await item.configure({ enabled: true }); await local.management('attention.configure', params);
+      await rejects(item.run(), params.quiet_start ? 'COMPANION_PAUSED' : 'ATTENTION_BLOCKED'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
     }
   });
   await check('correction/deletion during owner generation invalidates original dual contexts without refreshing them', async () => {
     for (const op of ['memory.correct', 'memory.delete']) {
-      await reset(); const item = service(); item.configure({ enabled: true });
+      await reset(); const item = service(); await item.configure({ enabled: true });
       modelHook = async n => { if (n === 2) { const found = await local.management('memory.query', { query: 'OWNER_PRIVATE_MARKER' }); const row = found.memories[0]; await local.management(op, { id: row.id, expected_revision: row.revision, ...(op.endsWith('correct') ? { statement: 'UPDATED_OWNER' } : {}) }); } };
       await rejects(item.run(), 'STALE_CONTEXT'); assert.equal(sends.length, 0);
     }
   });
   await check('concurrent correction after an allowed write cannot be blessed by the later context refresh', async () => {
-    await reset(); const item = service(); item.configure({ enabled: true }); const ingest = local.ingest.bind(local);
+    await reset(); const item = service(); await item.configure({ enabled: true }); const ingest = local.ingest.bind(local);
     local.ingest = async (...args) => { const result = await ingest(...args); if (args[1].includes(':thought:')) { const query = await local.management('memory.query', { query: 'OWNER_PRIVATE_MARKER' }); const record = query.memories[0]; await local.management('memory.correct', { id: record.id, expected_revision: record.revision, statement: 'UPDATED_DURING_REFRESH' }); } return result; };
     try { await rejects(item.run(), 'STALE_CONTEXT'); assert.equal(modelCalls.length, 1); assert.equal(sends.length, 0); } finally { local.ingest = ingest; }
   });
   await check('auto-write disabled permits fresh bounded research without falsely claiming persistence', async () => {
-    await reset(); const item = service(); item.configure({ enabled: true }); await local.management('memory.settings', { auto_write: false });
-    await item.run(); assert.equal(item.status().last.materialStored, false); assert.equal(item.status().last.thoughtStored, false); assert.equal(sends.length, 1);
+    await reset(); const item = service(); await item.configure({ enabled: true }); await local.management('memory.settings', { auto_write: false });
+    await item.run(); assert.equal((await item.status()).reader.materialStored, false); assert.equal((await item.status()).reader.thoughtStored, false); assert.equal(sends.length, 1);
     await local.management('memory.settings', { auto_write: true });
   });
   await check('thought carries authoritative material revision proofs; deleting or correcting material invalidates it', async () => {
     for (const operation of ['memory.delete', 'memory.correct']) {
-      await reset(); const item = service(); item.configure({ enabled: true }); await item.run();
+      await reset(); const item = service(); await item.configure({ enabled: true }); await item.run();
       const rows = (await local.management('memory.query', {})).memories;
       const material = rows.find(row => row.statement.includes('公开简介材料')); const thought = rows.find(row => row.statement.includes('从字幕看'));
       assert.deepEqual(thought.derived_from, [material.id]); assert.deepEqual(thought.source_revisions, { [material.id]: material.revision });
@@ -198,7 +216,7 @@ try {
       await reset(); const pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' });
       const saved = await local.ingest(pub, `bili:public:${bv}:material`, '旧资料不能重新使用');
       await local.management(operation, { id: saved.id, expected_revision: 1 }); await local.management('memory.settings', { auto_write: false });
-      const item = service(); item.configure({ enabled: true }); await rejects(item.run(), 'COMPANION_SOURCE_UNAVAILABLE'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
+      const item = service(); await item.configure({ enabled: true }); await rejects(item.run(), 'COMPANION_SOURCE_UNAVAILABLE'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
       await local.management('memory.settings', { auto_write: true });
     }
   });
@@ -207,7 +225,7 @@ try {
     const saved = await local.ingest(owner, event, 'PRIVATE_DELETED_SOURCE_COPY'); await local.management('memory.delete', { id: saved.id, expected_revision: 1 }); await local.management('memory.settings', { auto_write: false });
     const pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); const result = await local.supervisor.raw('context.sources', pub.binding, { source_event_ids: [event] });
     assert.deepEqual(result.sources, [{ source_event_id: event, status: 'missing' }]);
-    const item = service(); item.configure({ enabled: true }); await rejects(item.run(), 'DELETED_SOURCE'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
+    const item = service(); await item.configure({ enabled: true }); await rejects(item.run(), 'DELETED_SOURCE'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
     await local.management('memory.settings', { auto_write: true });
   });
   await check('missing from an invisible ancestor is not proof a material was never persisted', async () => {
@@ -215,7 +233,7 @@ try {
     pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); await local.ingest(pub, `bili:public:${bv}:material`, 'dependent material', { derivedFrom: [{ id: parent.id, revision: 1 }] });
     await local.management('memory.suspend', { id: parent.id, expected_revision: 1 }); await local.management('memory.settings', { auto_write: false });
     pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); const lookup = await local.supervisor.raw('context.sources', pub.binding, { source_event_ids: [`bili:public:${bv}:material`] }); assert.equal(lookup.sources[0].status, 'missing');
-    const item = service(); item.configure({ enabled: true }); await assert.rejects(item.run(), error => Boolean(error.code && error.hint)); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
+    const item = service(); await item.configure({ enabled: true }); await assert.rejects(item.run(), error => Boolean(error.code && error.hint)); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0);
     await local.management('memory.settings', { auto_write: true });
   });
   await check('finite source matrix: other-scope/quarantine requires persistence; enabled per-scope archival stays legal', async () => {
@@ -226,7 +244,7 @@ try {
       await local.management('memory.settings', { auto_write: enabled });
       const pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); const before = await local.supervisor.raw('context.sources', pub.binding, { source_event_ids: [event] });
       assert.deepEqual(before.sources, [{ source_event_id: event, status: 'missing' }]);
-      const item = service(); item.configure({ enabled: true });
+      const item = service(); await item.configure({ enabled: true });
       if (!enabled) { await rejects(item.run(), 'PERMISSION_DENIED'); assert.equal(modelCalls.length, 0); assert.equal(sends.length, 0); }
       else { await item.run(); assert.equal(sends.length, 1); assert.doesNotMatch(JSON.stringify(modelCalls[0]), /OTHER_SCOPE_PRIVATE_BODY|QUARANTINED_OLD_BODY/); const after = await local.supervisor.raw('context.sources', (await local.context({ kind: 'bili', account: 'public', peer: 'public' })).binding, { source_event_ids: [event] }); assert.equal(after.sources[0].status, 'active'); }
       await local.management('memory.settings', { auto_write: true });
@@ -236,7 +254,7 @@ try {
     await reset(); const event = `bili:public:${bv}:material`; const saved = await local.ingest(await local.context({ kind: 'bili', account: 'public', peer: 'public' }), event, 'OTHER_CHARACTER_RETIRED_BODY'); await local.management('memory.delete', { id: saved.id, expected_revision: 1 });
     character = { id: `${character.id}-other-role`, epoch: character.epoch + 1 }; await local.setMode('local'); await local.setQqOwner({ account: '999', peer: '123' });
     await local.management('attention.configure', { enabled: true, daily_limit: 4, cooldown_seconds: 0, quiet_start: '', quiet_end: '', timezone: 'UTC', muted: false, focused: false }); await local.management('memory.settings', { auto_write: false });
-    const item = service(); item.configure({ enabled: true }); await item.run(); assert.equal(sends.length, 1); assert.doesNotMatch(JSON.stringify(modelCalls), /OTHER_CHARACTER_RETIRED_BODY/); assert.equal(item.status().last.materialStored, false);
+    const item = service(); await item.configure({ enabled: true }); await item.run(); assert.equal(sends.length, 1); assert.doesNotMatch(JSON.stringify(modelCalls), /OTHER_CHARACTER_RETIRED_BODY/); assert.equal((await item.status()).reader.materialStored, false);
     await local.management('memory.settings', { auto_write: true });
   });
   await check('stored active material uses its corrected current body, without other unproven public context', async () => {
@@ -244,13 +262,13 @@ try {
     const saved = await local.ingest(pub, `bili:public:${bv}:material`, 'OLD_RETIRED_MATERIAL');
     await local.management('memory.correct', { id: saved.id, expected_revision: 1, statement: 'CURRENT_CORRECTED_PUBLIC_BODY' });
     pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); await local.ingest(pub, 'unrelated-public', 'OTHER_PUBLIC_WITHOUT_PROVENANCE');
-    await local.management('memory.settings', { auto_write: false }); const item = service(); item.configure({ enabled: true }); await item.run();
+    await local.management('memory.settings', { auto_write: false }); const item = service(); await item.configure({ enabled: true }); await item.run();
     const research = JSON.stringify(modelCalls[0]); assert.match(research, /CURRENT_CORRECTED_PUBLIC_BODY/); assert.doesNotMatch(research, /OLD_RETIRED_MATERIAL|OTHER_PUBLIC_WITHOUT_PROVENANCE|公开简介材料|OWNER_PRIVATE_MARKER/);
-    assert.equal(sends.length, 1); assert.equal(item.status().last.materialStored, true); assert.equal(item.status().last.thoughtStored, false);
+    assert.equal(sends.length, 1); assert.equal((await item.status()).reader.materialStored, true); assert.equal((await item.status()).reader.thoughtStored, false);
     await local.management('memory.settings', { auto_write: true });
   });
   await check('temporary never-persisted material cannot leave an orphan thought if auto-write is enabled mid-research', async () => {
-    await reset(); await local.management('memory.settings', { auto_write: false }); const item = service(); item.configure({ enabled: true });
+    await reset(); await local.management('memory.settings', { auto_write: false }); const item = service(); await item.configure({ enabled: true });
     modelHook = async n => { if (n === 1) await local.management('memory.settings', { auto_write: true }); };
     await rejects(item.run(), 'STALE_CONTEXT'); const pub = await local.context({ kind: 'bili', account: 'public', peer: 'public' }); assert.doesNotMatch(pub.text, /从字幕看|公开简介材料/); assert.equal(sends.length, 0);
   });
@@ -261,8 +279,8 @@ try {
   });
   await check('stop, role close and backend switch during generation forbid late sending', async () => {
     for (const action of ['stop', 'role', 'backend']) {
-      await reset(); const item = service(); item.configure({ enabled: true });
-      modelHook = async n => { if (n === 1) { if (action === 'stop') item.stop(); else if (action === 'role') env.roleActive = false; else await local.setMode('paused'); } };
+      await reset(); const item = service(); await item.configure({ enabled: true });
+      modelHook = async n => { if (n === 1) { if (action === 'stop') await item.stop(); else if (action === 'role') env.roleActive = false; else await local.setMode('paused'); } };
       await rejects(item.run(), action === 'role' ? 'COMPANION_PAUSED' : 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
     }
   });
@@ -282,39 +300,39 @@ try {
     await rejects(adapter.request('intent.claim', trusted, { intentId: stopped }), 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
   });
   await check('attention becomes focused after claim: actual transport blocked and finalized failed', async () => {
-    await reset(); const item = service(); item.configure({ enabled: true });
+    await reset(); const item = service(); await item.configure({ enabled: true });
     gateHook = async () => { await local.management('attention.configure', { focused: true }); };
-    await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal(item.status().last.outcome, 'failed');
+    await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal((await item.status()).last.outcome, 'failed');
   });
   await check('focus change after reservation and stop after claim both block the actual effect', async () => {
-    await reset(); const item = service(); item.configure({ enabled: true });
+    await reset(); const item = service(); await item.configure({ enabled: true });
     const original = adapter.request.bind(adapter);
     adapter.request = async (...args) => { const result = await original(...args); if (args[0] === 'attention.reserve' && result.reserved) await local.management('attention.configure', { focused: true }); return result; };
-    await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal(item.status().last.outcome, 'failed');
-    await reset(); const stopped = service(); stopped.configure({ enabled: true }); gateHook = async () => { stopped.stop(); };
-    await rejects(stopped.run(), 'COMPANION_STOPPED'); assert.equal(sends.length, 0); assert.equal(stopped.status().last.outcome, 'failed');
+    await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal((await item.status()).last.outcome, 'failed');
+    await reset(); const stopped = service(); await stopped.configure({ enabled: true }); gateHook = async () => { await stopped.stop(); };
+    await rejects(stopped.run(), 'COMPANION_STOPPED'); assert.equal(sends.length, 0); assert.equal((await stopped.status()).last.outcome, 'failed');
   });
   await check('mute changed during awaited identity guard is rechecked before any transport', async () => {
     await reset(); const original = adapter.withIntent.bind(adapter);
     adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); await local.management('attention.configure', { muted: true }); }, deliver });
-    const item = service(); item.configure({ enabled: true }); await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal(item.status().last.outcome, 'failed');
+    const item = service(); await item.configure({ enabled: true }); await rejects(item.run(), 'ATTENTION_BLOCKED'); assert.equal(sends.length, 0); assert.equal((await item.status()).last.outcome, 'failed');
   });
   await check('purpose quiet tightening during owner generation invalidates the old round', async () => {
     await reset(); let purpose = { quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 0, dailyMax: 4 };
-    const item = service({ purposeConfig: () => purpose }); item.configure({ enabled: true }); modelHook = async n => { if (n === 2) purpose = { ...purpose, quietStart: '00:00', quietEnd: '23:59' }; };
-    await rejects(item.run(), 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
+    const item = service({ purposeConfig: () => purpose }); await item.configure({ enabled: true }); modelHook = async n => { if (n === 2) await item.configure({ quietStart: '00:00', quietEnd: '00:00' }); };
+    await rejects(item.run(), 'FIXED_MODEL_STALE'); assert.equal(sends.length, 0);
   });
   await check('crossing purpose quiet time during awaited identity guard blocks transport without a config edit', async () => {
-    await reset(); let clock = +new Date(2026, 10, 2, 10, 59); const original = adapter.withIntent.bind(adapter);
+    await reset(); let clock = Date.now(); const quietStart = new Date(clock + 60000).toISOString().slice(11, 16), quietEnd = new Date(clock + 3600000).toISOString().slice(11, 16); const original = adapter.withIntent.bind(adapter);
     adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); clock += 2 * 60000; }, deliver });
-    const item = service({ now: () => clock, purposeConfig: () => ({ quietStart: '11:00', quietEnd: '12:00', idleThresholdMs: 0, dailyMax: 4 }) }); item.configure({ enabled: true });
-    await rejects(item.run(), 'COMPANION_PURPOSE_BLOCKED'); assert.equal(sends.length, 0);
+    const item = service({ now: () => clock }); await item.configure({ enabled: true, quietStart, quietEnd });
+    await rejects(item.run(), 'COMPANION_PAUSED'); assert.equal(sends.length, 0);
   });
   await check('owner activity revision or purpose policy changes while identity is awaited: no transport', async () => {
     for (const kind of ['owner-active', 'policy-change']) {
       await reset(); let idle = 100000000; let purpose = { quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 60000, dailyMax: 4 }; const original = adapter.withIntent.bind(adapter);
-      adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); if (kind === 'owner-active') adapter.beginIncoming('private:123', { self_id: 999, user_id: 123, message_id: 'new-active' }).finish(); else purpose = { ...purpose, idleThresholdMs: 200000000 }; }, deliver });
-      const item = service({ purposeConfig: () => purpose }); item.configure({ enabled: true });
+      adapter.withIntent = (id, { guard, deliver }) => original(id, { guard: async trusted => { await guard(trusted); if (kind === 'owner-active') adapter.beginIncoming('private:123', { self_id: 999, user_id: 123, message_id: 'new-active' }).finish(); else await item.configure({ muted: true }); }, deliver });
+      const item = service({ purposeConfig: () => purpose }); await item.configure({ enabled: true });
       await rejects(item.run(), kind === 'owner-active' ? 'COMPANION_ACTIVITY_CHANGED' : 'COMPANION_STOPPED'); assert.equal(sends.length, 0);
     }
   });
@@ -352,14 +370,14 @@ try {
     }
   });
   await check('model timeout aborts generation and has no delayed sending', async () => {
-    await reset(); const item = service({ modelTimeoutMs: 10 }); item.configure({ enabled: true }); modelHook = async () => new Promise(() => {});
-    await rejects(item.run(), 'COMPANION_MODEL_TIMEOUT'); assert.equal(modelCalls[0].signal.aborted, true); assert.equal(sends.length, 0); assert.equal(item.status().running, false);
+    await reset(); const item = service({ modelTimeoutMs: 10 }); await item.configure({ enabled: true }); modelHook = async () => new Promise(() => {});
+    await rejects(item.run(), 'FIXED_MODEL_TIMEOUT'); assert.equal(modelCalls[0].signal.aborted, true); assert.equal(sends.length, 0); assert.equal((await item.status()).running, false);
   });
   await check('explicit rejection versus unknown delivery finalize accurately; restart cannot replay source', async () => {
     for (const expected of ['failed', 'unknown']) {
-      await reset(); const item = service(); item.configure({ enabled: true }); delivery = expected;
-      await rejects(item.run(), expected === 'failed' ? 'DELIVERY_REJECTED' : 'COMPANION_DELIVERY_UNKNOWN'); assert.equal(sends.length, 1); assert.equal(item.status().last.outcome, expected);
-      item.dispose(); const next = service(); await rejects(next.run(), 'COMPANION_PURPOSE_BLOCKED'); assert.equal(sends.length, 1);
+      await reset(); const item = service(); await item.configure({ enabled: true }); delivery = expected;
+      await rejects(item.run(), expected === 'failed' ? 'DELIVERY_REJECTED' : 'COMPANION_DELIVERY_UNKNOWN'); assert.equal(sends.length, 1); assert.equal((await item.status()).last.outcome, expected);
+      item.dispose(); const next = service(); assert.equal((await next.run()).skipped, true); assert.equal(sends.length, 1);
     }
   });
   await check('real HTTP action contract rejects caller targets/text and exposes structured config/run/stop errors', async () => {
@@ -370,7 +388,7 @@ try {
     };
     const disabled = await invoke('run'); assert.equal(disabled.data.code, 'COMPANION_DISABLED'); assert.ok(disabled.data.error && disabled.data.hint);
     assert.equal((await invoke('run', { target: '124', text: 'no' })).data.code, 'INVALID_REQUEST');
-    assert.equal((await invoke('config', { enabled: true, dailyMax: 0 })).data.code, 'INVALID_REQUEST');
+    assert.equal((await invoke('config', { enabled: true, dailyMax: -1 })).data.code, 'INVALID_REQUEST');
     assert.equal((await invoke('status', {}, 'GET')).data.config.enabled, false);
     assert.equal((await invoke('stop')).data.stopped, true);
   });

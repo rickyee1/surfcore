@@ -75,6 +75,112 @@ class Metadata(unittest.TestCase):
         self.pet = self.pet_binding()
         return result
 
+    def confirmed(self, event, statement, sources, binding=None, **extra):
+        binding = binding or self.pet
+        return self.call('memory.assistant-output', dict(source_event_id=event, text=statement,
+            expected_memory_epoch=self.epoch(), ingress=dict(token=self.host(binding), kind='confirmed_assistant_output'),
+            derived_from=[source['id'] for source in sources], source_revisions={source['id']: source.get('revision', 1) for source in sources}, **extra), binding)
+
+    def test_confirmed_output_dependencies_retire_paraphrase_after_correction_and_delete(self):
+        for action in ('correct', 'delete'):
+            source = self.good(self.original('owner-' + action, 'Synthetic owner plan ' + action))
+            reply = self.good(self.confirmed('reply-' + action, 'I promised to follow the plan ' + action, [source]))
+            meta = self.metadata(reply['id'])
+            self.assertEqual(meta['source_speaker']['role'], 'assistant')
+            self.assertEqual(meta['statement_origin'], 'confirmed_output')
+            self.assertTrue(meta['verbatim'])
+            self.assertIsNone(meta['source_speaker']['owner_at_receive'])
+            self.now += 100
+            self.assertTrue(self.good(self.confirmed('reply-' + action, 'different replay', [source]))['duplicate'])
+            self.assertEqual(self.metadata(reply['id']), meta)
+            params = dict(id=source['id'], expected_revision=1)
+            if action == 'correct': params['statement'] = 'New owner plan'
+            self.good(self.call('memory.' + action, params, self.owner))
+            self.assertNotIn(reply['id'], [row['id'] for row in self.materials()])
+            visible = self.good(self.call('memory.query', {}, self.pet))['memories']
+            self.assertNotIn(reply['id'], [row['id'] for row in visible])
+        self.reopen()
+        self.assertFalse(any('I promised' in row['statement'] for row in self.materials()))
+
+    def test_confirmed_output_dedicated_host_contract_and_auto_write(self):
+        source = self.good(self.original('host-input'))
+        self.bad(self.confirmed('no-sources', 'output', []), 'PERMISSION_DENIED')
+        self.bad(self.call('memory.assistant-output', dict(ingress=dict(token=self.host(), kind='confirmed_assistant_output')), self.owner), 'PERMISSION_DENIED')
+        self.bad(self.original('generic-ingest-confirmed', kind='confirmed_assistant_output'), 'PERMISSION_DENIED')
+        self.bad(self.original('generic-assistant-derived', kind='assistant_output', derived_from=[source['id']]), 'PERMISSION_DENIED')
+        self.good(self.call('memory.settings', dict(auto_write=False), self.owner))
+        self.bad(self.confirmed('disabled-output', 'body must not persist', [source]), 'AUTO_WRITE_DISABLED')
+        self.assertFalse(any('body must not persist' in row['statement'] for row in self.materials()))
+
+    def test_confirmed_output_frame_binds_dependencies_and_restore(self):
+        source = self.good(self.original('frame-input'))
+        reply = self.good(self.confirmed('frame-output', 'Confirmed output frame', [source]))
+        exported = self.good(self.call('memory.export', {}, self.owner))
+        self.assertTrue(any(row['memory'] == reply['id'] for row in exported['record_metadata']))
+        backup = self.good(self.call('backup.create', dict(password='synthetic-metadata-password'), self.owner))
+        self.restore(backup['backup_id'])
+        self.assertEqual(self.metadata(reply['id'])['statement_origin'], 'confirmed_output')
+        # An old reader changing the dependency frame cannot bless the body.
+        self.service.db.execute("UPDATE memories SET derived='[]' WHERE id=?", (reply['id'],))
+        self.assertEqual(self.metadata(reply['id'])['source_speaker']['role'], 'unknown')
+        self.good(self.call('memory.correct', dict(id=reply['id'], expected_revision=1, statement='Corrected'), self.owner))
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM record_metadata WHERE memory=?', (reply['id'],)).fetchone()[0], 0)
+
+    def test_confirmed_output_missing_proofs_never_projects_or_exports_confirmed_identity(self):
+        source = self.good(self.original('missing-proof-source'))
+        output = self.good(self.confirmed('missing-proof-output', 'Old confirmed promise', [source]))
+        self.service.db.execute('DELETE FROM record_source_revisions WHERE memory=?', (output['id'],))
+        self.assertEqual(self.metadata(output['id'])['source_speaker']['role'], 'unknown')
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+        exported = self.good(self.call('memory.export', {}, self.owner))
+        self.assertNotIn(output['id'], [row['memory'] for row in exported['record_metadata']])
+        backup = self.good(self.call('backup.create', dict(password='synthetic-metadata-password'), self.owner))
+        self.restore(backup['backup_id'])
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+        self.reopen()
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+
+    def test_confirmed_output_corrected_ancestor_retires_metadata_before_old_reader_aba(self):
+        source = self.good(self.original('aba-source', 'Old owner fact'))
+        output = self.good(self.confirmed('aba-output', 'I repeat the old owner fact', [source]))
+        self.good(self.call('memory.correct', dict(id=source['id'], expected_revision=1, statement='New owner fact'), self.owner))
+        self.assertEqual(self.service.db.execute('SELECT count(*) FROM record_metadata WHERE memory=?', (output['id'],)).fetchone()[0], 0)
+        self.service.db.execute("UPDATE memories SET status='active', revision=1 WHERE id=?", (output['id'],))
+        self.service.db.execute('UPDATE record_source_revisions SET revision=2 WHERE memory=?', (output['id'],))
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+        self.reopen()
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+        exported = self.good(self.call('memory.export', {}, self.owner))
+        self.assertNotIn(output['id'], [row['memory'] for row in exported['record_metadata']])
+
+    def test_confirmed_output_frame_binds_proof_revision_even_without_current_correction_hook(self):
+        source = self.good(self.original('old-reader-source'))
+        output = self.good(self.confirmed('old-reader-output', 'Exact confirmed output', [source]))
+        # A pre-extension reader changes the dependency/proof frame directly.
+        self.service.db.execute('UPDATE memories SET revision=2 WHERE id=?', (source['id'],))
+        self.service.db.execute('UPDATE record_source_revisions SET revision=2 WHERE memory=?', (output['id'],))
+        self.assertFalse(self.metadata(output['id'])['verbatim'])
+        exported = self.good(self.call('memory.export', {}, self.owner))
+        self.assertNotIn(output['id'], [row['memory'] for row in exported['record_metadata']])
+
+    def test_confirmed_output_backup_uses_the_exact_projection_proof_gate(self):
+        source = self.good(self.original('backup-proof-source'))
+        output = self.good(self.confirmed('backup-proof-output', 'Confirmed backup output', [source]))
+        snapshot = self.service.backups.collect('a')
+        self.service.backups.validate(snapshot)
+        for mode in ('missing', 'changed'):
+            broken = copy.deepcopy(snapshot)
+            proofs = broken['records']['record_source_revisions']
+            if mode == 'missing':
+                broken['records']['record_source_revisions'] = [row for row in proofs if row['memory'] != output['id']]
+            else:
+                next(row for row in proofs if row['memory'] == output['id'])['revision'] = 2
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                self.service.backups.validate(broken)
+        old = copy.deepcopy(snapshot)
+        old['records'].pop('record_metadata')
+        self.service.backups.validate(old)  # Optional metadata remains optional for old packages.
+
     def test_actual_cipher_new_receipt_and_actor_are_bound(self):
         self.assertTrue(self.service.db.execute('PRAGMA cipher_version').fetchone()[0])
         saved = self.good(self.original('fresh-user'))

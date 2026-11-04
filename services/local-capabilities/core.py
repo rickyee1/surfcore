@@ -207,7 +207,7 @@ class CapabilityService:
                 self.media.retire(code='TOOL_STOPPED')
             return result
         paused = self.db.execute('SELECT paused FROM recovery_state WHERE character=?', (session['character'],)).fetchone()
-        if paused and paused[0] and (op.startswith('context.') or op in ('attention.check','attention.reserve') or (op.startswith('memory.') and not session['management'])):
+        if paused and paused[0] and (op.startswith('context.') or op in ('attention.check','attention.reserve','purpose.state') or (op.startswith('memory.') and not session['management'])):
             raise ServiceError('RECOVERY_REVIEW_REQUIRED', '恢复内容尚未完成主人复审。', '在管理页核对最新删除记录并明确复审；暂停生成与发送。')
         if op.startswith('memory.semantic.'):
             return self.semantic.dispatch(op,session,params)
@@ -215,6 +215,13 @@ class CapabilityService:
             return self.governance.dispatch(op, session, params)
         if op.startswith('backup.'):
             return self.backups.dispatch(op, session, params)
+        if op == 'purpose.state':
+            if (session['management'] or not session['owner'] or session['platform'] not in ('pet', 'qq')
+                    or session['scope'].startswith('qq:group:') or set(params) != {'memory_epoch'}):
+                raise ServiceError('PERMISSION_DENIED', '目的防重放状态仅供原主人私聊或桌宠普通回合读取。')
+            if params['memory_epoch'] != self.epoch(session['character']):
+                raise ServiceError('STALE_CONTEXT', '目的防重放读取的原上下文已过期。')
+            return self.portable.purpose(session['character'])
         if op == "context.validate":
             if params.get("memory_epoch") != self.epoch(session["character"]):
                 raise ServiceError("STALE_CONTEXT", "记忆版本已改变。", "重新检索并生成回复，禁止发送旧上下文。")
@@ -338,7 +345,10 @@ class CapabilityService:
             records = [self.record(row) for row in rows if (session["management"] or self.visible(row, permitted))
                        and ((row['id'] in candidates) if candidates is not None else query.casefold() in row["statement"].casefold())]
             return dict(memories=records[:limit], memory_epoch=self.epoch(character), character_epoch=session["epoch"])
-        if op in ("ingest", "propose"):
+        if op in ("ingest", "propose", "assistant-output"):
+            confirmed_output = op == "assistant-output"
+            if confirmed_output and (session["management"] or not params.get("ingress")):
+                raise ServiceError("PERMISSION_DENIED", "确认输出需要原普通回合的可信宿主凭据。")
             if op == 'propose' and 'ingress' in params:
                 raise ServiceError('PERMISSION_DENIED', '自动提案不能声明原始入站来源。')
             if params.get("expected_memory_epoch") != self.epoch(character):
@@ -348,9 +358,9 @@ class CapabilityService:
             if not self.db.execute("SELECT auto_write FROM characters WHERE id=?", (character,)).fetchone()[0]:
                 # Disabled persistence does not bless deleted/invalid input as a
                 # never-stored live source. Run only the existing read-side checks.
-                self.ingest(session, params, validate_only=True)
+                self.ingest(session, params, validate_only=True, confirmed_output=confirmed_output)
                 raise ServiceError("AUTO_WRITE_DISABLED", "已停用自动记忆整理。", "由主人在记忆管理页开启。")
-            return self.ingest(session, params)
+            return self.ingest(session, params, confirmed_output=confirmed_output)
         self.management(session)
         if op == "settings":
             if "auto_write" in params:
@@ -381,6 +391,9 @@ class CapabilityService:
             # management history, but require fresh provenance before reuse.
             for identifier in self.affected_records(character, row["id"]) - {row["id"]}:
                 self.db.execute("UPDATE memories SET status='suspended',revision=revision+1 WHERE id=? AND character=? AND status='active'", (identifier, character))
+                # Known dependency retirement is irreversible metadata retirement,
+                # even if an old reader later restores a descendant's frame (ABA).
+                self.db.execute('DELETE FROM record_metadata WHERE memory=? AND character=?', (identifier, character))
             self.db.execute("UPDATE memories SET statement=?,revision=revision+1,pinned=1 WHERE id=?", (statement, row["id"]))
             self.metadata.revise(row, statement, row['revision'] + 1)
             self.fingerprint(row["id"], character, "content", digest(statement))
@@ -399,7 +412,7 @@ class CapabilityService:
     def fingerprint(self, memory, character, kind, hashed):
         self.db.execute("INSERT OR IGNORE INTO fingerprints VALUES(?,?,?,?)", (memory, character, kind, hashed))
 
-    def ingest(self, session, params, migration=False, *, validate_only=False):
+    def ingest(self, session, params, migration=False, *, validate_only=False, confirmed_output=False):
         character = session["character"]
         statement = text(params.get("text"), 12000)
         event = text(params.get("source_event_id"), 500)
@@ -411,7 +424,7 @@ class CapabilityService:
                 raise ServiceError('INVALID_REQUEST','来源修订必须恰好对应全部唯一派生来源。')
             for revision in proofs.values():
                 integer(revision,1,2**53-1)
-        ingress = self.metadata.proof(session, params, migration)
+        ingress = self.metadata.proof(session, params, migration, confirmed_output=confirmed_output)
         fingerprints = [("event", digest(event)), ("content", digest(statement))] + [("source", digest(ref)) for ref in refs]
         for kind, hashed in fingerprints:
             if self.db.execute("SELECT 1 FROM tombstones WHERE character=? AND kind=? AND digest=?", (character, kind, hashed)).fetchone():
@@ -447,11 +460,11 @@ class CapabilityService:
         identifier = uuid.uuid4().hex
         self.db.execute("INSERT INTO memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (identifier, character, session["scope"], session["principal"], statement, 1, status, 0, digest(event), digest(statement), encode(refs), encode(derived), "legacy_summary" if migration else "episode"))
         self.db.execute("INSERT INTO revisions VALUES(?,?,?,?)", (identifier, 1, statement, "migration" if migration else "ingest"))
-        self.metadata.capture(session, identifier, statement, event, ingress)
         for kind, hashed in fingerprints:
             self.fingerprint(identifier, character, kind, hashed)
         if proofs is not None:
             self.db.executemany('INSERT INTO record_source_revisions VALUES(?,?,?)',[(identifier,source,revision) for source,revision in proofs.items()])
+        self.metadata.capture(session, identifier, statement, event, ingress)
         if status == "deleted":
             self.delete_tree(character, identifier)
         self.governance.index(identifier)
@@ -516,6 +529,26 @@ class CapabilityService:
 
     def attention(self, op, session, params):
         character = session["character"]
+        if op == "status":
+            if params:
+                raise ServiceError("INVALID_REQUEST", "注意力状态不接受主体、配置或查询参数。")
+            if not (session["management"] or session["owner"] and (
+                    session["scope"] in ("owner:local", "pet:local") or session["scope"].startswith("qq:private:"))):
+                raise ServiceError("PERMISSION_DENIED", "仅当前绑定主人或本机管理页可读取注意力状态。")
+            # This read must not initialize or rewrite a row. Use the same merged
+            # native/portable event union as the authoritative check/reserve path.
+            state = self.db.execute("SELECT * FROM attention WHERE character=?", (character,)).fetchone()
+            config = json.loads(state["config"]) if state else dict(DEFAULT_ATTENTION)
+            intensity = state["intensity"] if state else 1
+            now = self.local_now(config)
+            charged = [event for event in self.portable.events(character).values() if event["charged"]]
+            today_count = sum(datetime.fromtimestamp(event["createdUtcMs"] / 1000, now.tzinfo).date() == now.date()
+                              for event in charged)
+            last_at = max((event["createdUtcMs"] for event in charged), default=None)
+            cooldown_until = last_at + round(config["cooldown_seconds"] * 1000 / intensity) if last_at is not None else None
+            return dict(config=config, today_count=today_count, effective_daily_limit=max(0, int(config["daily_limit"] * intensity)),
+                        unanswered=state["unanswered"] if state else 0, intensity=intensity,
+                        cooldown_until_ms=cooldown_until, local_date=now.date().isoformat())
         self.db.execute("INSERT OR IGNORE INTO attention(character,config) VALUES(?,?)", (character, encode(DEFAULT_ATTENTION)))
         state = self.db.execute("SELECT * FROM attention WHERE character=?", (character,)).fetchone()
         config = json.loads(state["config"])

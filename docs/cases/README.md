@@ -6,6 +6,7 @@
 
 | 日期 | 案例 | 一句话 | 版本 |
 | --- | --- | --- | --- |
+| 2026-11-04 | [完整目的的文字交付](2026-11-04-governed-purpose-coordinator.md) | 用户结束测试后，采纳已有文字协调器、来源治理与迁移去重修补 | 文字版收尾 |
 | 2026-11-04 | [工具结果不明的呈现](2026-11-04-tool-outcome-unknown.md) | host保留unknown并透传具体提示，回归夹具双层禁止真实GUI启动 | fork开发分支 |
 | 2026-11-03 | [目的素材来源与时间](2026-11-03-purpose-source-metadata.md) | P1 attempt2功能独立通过，旧reader失效来源不复活；JS接线未做 | fork开发分支，未部署 |
 | 2026-11-03 | [完整融合实测与剩余项](2026-11-03-full-integration-live-results.md) | 9f实际QQ/Pet/工具与两小时观察、A01失败分母及purpose缺口 | 未完整验收 |

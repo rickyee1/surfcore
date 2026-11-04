@@ -8,6 +8,7 @@ import { createSemanticWriter } from '../plugins/surfcore/lib/local-capabilities
 import { readModelCall } from '../plugins/surfcore/lib/local-capabilities/model-call-registry.js';
 import { createModelPolicy } from './a01-model-policy.mjs';
 const root = path.resolve(import.meta.dirname, '..');
+fs.mkdirSync(path.resolve('.local/evidence/a01-controls-attempt1'), { recursive: true });
 const temp = fs.mkdtempSync(path.join(root, '.local/evidence/a01-controls-attempt1/writer-policy-'));
 const supervisor = new CapabilitySupervisor({ python: path.join(root, '.venv/Scripts/python.exe'), entry: path.join(root, 'services/local-capabilities/server.py'), dataDir: path.join(temp, 'data'), env: { SURFCORE_LOCAL_KEY: crypto.randomBytes(32).toString('hex') } });
 let character = { id: 'synthetic-policy-pet', epoch: 1 }, writer, finish = 'stop', contextWindow = 1048576;

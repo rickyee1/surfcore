@@ -15,7 +15,7 @@ from storage import ServiceError
 COLUMNS = ('memory', 'character', 'scope', 'bound_principal', 'received_at_ms',
            'source_revision', 'event_hash', 'content_hash', 'source_kind', 'platform',
            'account_id', 'conversation_id', 'owner_at_receive', 'record_revision', 'record_content_hash')
-KINDS = ('user_input', 'assistant_output', 'external_source')
+KINDS = ('user_input', 'assistant_output', 'external_source', 'confirmed_assistant_output')
 RESERVED = {'source_metadata', 'received_at_ms', 'speaker', 'origin'}
 
 
@@ -25,7 +25,19 @@ def unknown(derived=False):
                 origin=None, statement_origin='derived' if derived else 'unknown', verbatim=False)
 
 
-def validate_row(value, memory, revisions=None):
+def frame_hash(statement, derived, kind, source_revisions=None):
+    body = statement
+    if kind == 'confirmed_assistant_output':
+        sources = json.loads(derived)
+        if (not sources or len(set(sources)) != len(sources) or not isinstance(source_revisions, dict)
+                or set(source_revisions) != set(sources)
+                or any(type(revision) is not int or not 1 <= revision < 2**53 for revision in source_revisions.values())):
+            raise ValueError('metadata confirmed source revisions')
+        body = json.dumps([statement, sources, source_revisions], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+
+def validate_row(value, memory, revisions=None, source_revisions=None):
     """Validate portable data without inventing any missing metadata."""
     if not isinstance(value, dict) or set(value) != set(COLUMNS):
         raise ValueError('metadata fields')
@@ -33,9 +45,10 @@ def validate_row(value, memory, revisions=None):
             or value['scope'] != memory['scope'] or value['bound_principal'] != memory['principal']
             or memory['status'] == 'deleted' or value['event_hash'] != memory['event_hash']
             or memory['content_hash'] != value['content_hash']
-            or memory['kind'] != 'episode' or json.loads(memory['derived']) != []
+            or memory['kind'] != 'episode'
+            or (bool(json.loads(memory['derived'])) != (value['source_kind'] == 'confirmed_assistant_output'))
             or value['record_revision'] != memory['revision']
-            or hashlib.sha256(memory['statement'].encode('utf-8')).hexdigest() != value['record_content_hash']):
+            or frame_hash(memory['statement'], memory['derived'], value['source_kind'], source_revisions) != value['record_content_hash']):
         raise ValueError('metadata source identity')
     if (type(value['received_at_ms']) is not int or not 0 < value['received_at_ms'] < 2**53
             or type(value['source_revision']) is not int or value['source_revision'] != 1
@@ -58,6 +71,8 @@ def validate_row(value, memory, revisions=None):
                    or platform == 'bili' and scope == 'bili:public')
     if not valid_scope or value['source_kind'] not in KINDS:
         raise ValueError('metadata channel')
+    if value['source_kind'] == 'confirmed_assistant_output' and (platform not in ('pet', 'qq') or scope.startswith('qq:group:')):
+        raise ValueError('metadata confirmed output audience')
     if (value['source_kind'] == 'external_source') != (platform == 'bili'):
         raise ValueError('metadata external actor')
     if type(value['owner_at_receive']) is not int or value['owner_at_receive'] not in (0, 1):
@@ -106,7 +121,7 @@ class RecordMetadata:
         self.service.after_commit.append(publish)
         return dict(ingress_token=value['token'])
 
-    def proof(self, session, params, migration=False):
+    def proof(self, session, params, migration=False, *, confirmed_output=False):
         if migration:
             # Legacy input fields are data, not a host attestation.
             return None
@@ -125,12 +140,23 @@ class RecordMetadata:
                 or current['epoch'] != session['epoch']
                 or not hmac.compare_digest(current['token'], ingress['token'])):
             raise ServiceError('PERMISSION_DENIED', '来源凭据不属于当前渠道绑定或已失效。', '重新绑定实际入站渠道，不重用旧来源凭据。')
-        if params.get('derived_from'):
+        if confirmed_output:
+            if (ingress['kind'] != 'confirmed_assistant_output' or not params.get('derived_from')
+                    or not params.get('source_revisions') or session['scope'].startswith('qq:group:')
+                    or session['platform'] not in ('pet', 'qq')):
+                raise ServiceError('PERMISSION_DENIED', '确认输出必须绑定原私聊或桌宠的全部来源修订。')
+        elif ingress['kind'] == 'confirmed_assistant_output':
+            raise ServiceError('PERMISSION_DENIED', '确认输出只能由可信普通回合收尾入口登记。')
+        elif params.get('derived_from'):
             raise ServiceError('PERMISSION_DENIED', '派生内容不能登记为原始入站原话。', '省略 ingress，保留 derived_from 与原来源修订证明。')
         platform, kind = session['platform'], ingress['kind']
         if platform not in ('pet', 'qq', 'bili') or (kind == 'external_source') != (platform == 'bili'):
             raise ServiceError('PERMISSION_DENIED', '原始来源类型与可信渠道不匹配。', '使用真实渠道的来源类型；公开视频不能声明主人原话。')
         return kind
+
+    def source_revisions(self, identifier):
+        return {row['source']: row['revision'] for row in self.db.execute(
+            'SELECT source,revision FROM record_source_revisions WHERE memory=?', (identifier,))}
 
     def capture(self, session, identifier, statement, event, kind):
         if kind is None:
@@ -143,11 +169,12 @@ class RecordMetadata:
                          hashlib.sha256(event.encode('utf-8')).hexdigest(), hashlib.sha256(statement.encode('utf-8')).hexdigest(),
                          kind, session['platform'], session['account'], session['conversation'],
                          int(bool(session['owner'])) if kind == 'user_input' and not session['scope'].startswith('qq:group:') else 0,
-                         1, hashlib.sha256(statement.encode('utf-8')).hexdigest()))
+                         1, frame_hash(statement, self.db.execute('SELECT derived FROM memories WHERE id=?', (identifier,)).fetchone()[0], kind, self.source_revisions(identifier))))
 
     def revise(self, previous, statement, revision):
         """Track a known current correction; never repair an untracked old write."""
-        if self.validated(previous) is None:
+        frame = self.validated(previous)
+        if frame is None:
             # Retire in the owning correction transaction: merely skipping the
             # update lets an old revision/body recur and match a stale frame (ABA).
             self.db.execute('DELETE FROM record_metadata WHERE memory=? AND character=?',
@@ -156,9 +183,9 @@ class RecordMetadata:
         self.db.execute('''UPDATE record_metadata SET record_revision=?,record_content_hash=?
             WHERE memory=? AND character=? AND scope=? AND bound_principal=? AND event_hash=?
             AND record_revision=? AND record_content_hash=?''',
-            (revision, hashlib.sha256(statement.encode('utf-8')).hexdigest(), previous['id'], previous['character'],
+            (revision, frame_hash(statement, previous['derived'], frame['source_kind'], self.source_revisions(previous['id'])), previous['id'], previous['character'],
              previous['scope'], previous['principal'], previous['event_hash'], previous['revision'],
-             hashlib.sha256(previous['statement'].encode('utf-8')).hexdigest()))
+             frame_hash(previous['statement'], previous['derived'], frame['source_kind'], self.source_revisions(previous['id']))))
 
     def validated(self, row):
         """One source/frame gate for projection, export and known revisions."""
@@ -169,7 +196,7 @@ class RecordMetadata:
         value = dict(stored)
         revisions = [dict(r) for r in self.db.execute('SELECT * FROM revisions WHERE memory=? AND revision=1', (row['id'],))]
         try:
-            validate_row(value, row, revisions)
+            validate_row(value, row, revisions, self.source_revisions(row['id']))
         except (ValueError, TypeError, KeyError):
             return None  # Old-reader rewrites/orphans never become new original speech.
         return value
@@ -183,8 +210,9 @@ class RecordMetadata:
         if value is None:
             return result
         group = row['scope'].startswith('qq:group:')
-        role = 'unknown' if group else {'user_input': 'user', 'assistant_output': 'assistant', 'external_source': 'external'}[value['source_kind']]
-        verbatim = (not derived and row['kind'] == 'episode' and row['revision'] == value['source_revision']
+        role = 'unknown' if group else {'user_input': 'user', 'assistant_output': 'assistant', 'confirmed_assistant_output': 'assistant', 'external_source': 'external'}[value['source_kind']]
+        confirmed = value['source_kind'] == 'confirmed_assistant_output'
+        verbatim = ((not derived or confirmed) and row['kind'] == 'episode' and row['revision'] == value['source_revision']
                     and row['content_hash'] == value['content_hash']
                     and hashlib.sha256(row['statement'].encode('utf-8')).hexdigest() == value['content_hash'])
         return dict(received_at_ms=value['received_at_ms'], time_basis='service_received',
@@ -194,7 +222,7 @@ class RecordMetadata:
                     # authenticated account identity to every public reader.
                     origin=dict(platform=value['platform'], account_id=value['account_id'] if value['platform'] != 'bili' else None,
                                 conversation_id=value['conversation_id'] if value['platform'] != 'bili' else None),
-                    statement_origin='derived' if derived else 'original' if verbatim else 'revised', verbatim=verbatim)
+                    statement_origin='confirmed_output' if confirmed and verbatim else 'derived' if derived else 'original' if verbatim else 'revised', verbatim=verbatim)
 
     def export_rows(self, character):
         """Owner export/snapshot domain, not an ordinary material-read bypass.

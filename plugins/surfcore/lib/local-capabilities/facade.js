@@ -81,6 +81,12 @@ export class LocalCapabilities {
     return query ? this.refineContext(context, query) : context;
   }
   async refineContext(context, query, options = {}) { return refineSemanticContext(this, context, query, options); }
+  async purposeState(context) {
+    await this.validate(context);
+    const result = await this.supervisor.raw('purpose.state', context.binding, { memory_epoch: context.memory_epoch });
+    await this.validate(context);
+    return result;
+  }
   async materials(channel, options = {}) {
     const { limit = 20 } = options;
     if (Object.keys(options).some(key => key !== 'limit') || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)
@@ -119,10 +125,16 @@ export class LocalCapabilities {
     return result;
   }
   endTurn(lease) { if (lease) this.semanticWriter?.end(lease); }
-  async ingest(context, source_event_id, text, { derivedFrom = [], actor = 'unknown', original = false } = {}) {
+  ingest(context, eventId, text, options = {}) { return this.#ingest(context, eventId, text, options); }
+  // Host-only. Browser/agent/Writer dispatchers never expose this receipt entry.
+  ingestConfirmedOutput(context, eventId, text, { sources, guard } = {}) {
+    if (!sources?.length || typeof guard !== 'function') throw new CapabilityError('INVALID_REQUEST', '确认输出缺少原回合来源和守卫。');
+    return this.#ingest(context, eventId, text, { derivedFrom: sources, actor: 'assistant', guard }, true);
+  }
+  async #ingest(context, source_event_id, text, { derivedFrom = [], actor = 'unknown', original = false, guard } = {}, confirmedOutput = false) {
     if (typeof source_event_id !== 'string' || !source_event_id || source_event_id.length > 500) throw new CapabilityError('INVALID_REQUEST', '经历事件标识无效。');
     if (!['user', 'assistant', 'external', 'unknown'].includes(actor)) throw new CapabilityError('INVALID_REQUEST', '经历来源类型无效。');
-    if (!Array.isArray(derivedFrom) || derivedFrom.length > 20 || derivedFrom.some(source => !source || typeof source.id !== 'string' || !source.id || source.id.length > 200 || !Number.isSafeInteger(source.revision) || source.revision < 1) || new Set(derivedFrom.map(source => source.id)).size !== derivedFrom.length) throw new CapabilityError('INVALID_REQUEST', '派生来源版本无效。');
+    if (!Array.isArray(derivedFrom) || derivedFrom.length > (confirmedOutput ? 50 : 20) || derivedFrom.some(source => !source || typeof source.id !== 'string' || !source.id || source.id.length > 200 || !Number.isSafeInteger(source.revision) || source.revision < 1) || new Set(derivedFrom.map(source => source.id)).size !== derivedFrom.length) throw new CapabilityError('INVALID_REQUEST', '派生来源版本无效。');
     if (typeof original !== 'boolean' || original && (derivedFrom.length || actor === 'unknown'))
       throw new CapabilityError('INVALID_REQUEST', '原始来源不能包含派生证明或未知发言者。', '仅在可信宿主收到本次原始输入、输出或公共来源时声明 original。');
     // Capture this write's authority once, including the ORIGINAL state object.
@@ -133,6 +145,7 @@ export class LocalCapabilities {
     const sourceContext = { binding, memory_epoch: context.memory_epoch }, generation = this.supervisor.generation;
     const derived = derivedFrom.map(source => ({ id: source.id, revision: source.revision }));
     const assertOriginal = () => {
+      guard?.();
       this.assertReady(target);
       const current = this.currentCharacter();
       if (current.id !== character.id || current.epoch !== character.epoch || binding.key !== `${character.id}:${character.epoch}` ||
@@ -146,13 +159,13 @@ export class LocalCapabilities {
     const validateOriginal = async () => {
       assertOriginal(); await this.validate(sourceContext); assertOriginal();
     };
-    if (original && (binding.platform === 'local' || !['pet', 'qq', 'bili'].includes(binding.platform) ||
+    if ((original || confirmedOutput) && (binding.platform === 'local' || !['pet', 'qq', 'bili'].includes(binding.platform) ||
         (binding.platform === 'bili' ? actor !== 'external' : !['user', 'assistant'].includes(actor)) ||
         ![...this.bindings.values()].some(value => value.session_binding === binding.session_binding && value.platform === binding.platform)))
       throw new CapabilityError('PERMISSION_DENIED', '原始来源类型与原普通渠道绑定不匹配。', '使用本次真实来源的原绑定；管理、迁移和 Writer 不得声明原话。');
     await validateOriginal(); assertOriginal();
     let ingress;
-    if (original) {
+    if (original || confirmedOutput) {
       if (!this.#ingress.has(binding.session_binding)) {
         const opening = this.supervisor.raw('memory.ingress.open', binding).then(result => result.ingress_token);
         this.#ingress.set(binding.session_binding, opening);
@@ -162,14 +175,14 @@ export class LocalCapabilities {
       assertOriginal();
       await validateOriginal();
       assertOriginal();
-      ingress = { token, kind: { user: 'user_input', assistant: 'assistant_output', external: 'external_source' }[actor] };
+      ingress = { token, kind: confirmedOutput ? 'confirmed_assistant_output' : { user: 'user_input', assistant: 'assistant_output', external: 'external_source' }[actor] };
     }
     // Persist intent first: an unknown IPC outcome must never permit rollback to legacy.
     assertOriginal(); state.written = true; this.persist(); assertOriginal();
     const refs = [`event:${source_event_id}`, ...(actor !== 'unknown' ? [`writer-origin:${actor}:${crypto.createHash('sha256').update(source_event_id).digest('hex')}`] : [])];
     try {
       assertOriginal();
-      const result = await this.supervisor.raw('memory.ingest', binding, { source_event_id, text, source_refs: refs, expected_memory_epoch: sourceContext.memory_epoch, ...(ingress ? { ingress } : {}), ...(derived.length ? { derived_from: derived.map(source => source.id), source_revisions: Object.fromEntries(derived.map(source => [source.id, source.revision])) } : {}) });
+      const result = await this.supervisor.raw(confirmedOutput ? 'memory.assistant-output' : 'memory.ingest', binding, { source_event_id, text, source_refs: refs, expected_memory_epoch: sourceContext.memory_epoch, ...(ingress ? { ingress } : {}), ...(derived.length ? { derived_from: derived.map(source => source.id), source_revisions: Object.fromEntries(derived.map(source => [source.id, source.revision])) } : {}) });
       assertOriginal();
       if (!result.duplicate) this.semanticWriter?.notify(binding);
       return result;
@@ -177,7 +190,7 @@ export class LocalCapabilities {
     catch (e) { assertOriginal(); if (e.code === 'AUTO_WRITE_DISABLED') return { skipped: true, stored: false, memory_epoch: sourceContext.memory_epoch }; throw e; }
   }
   async management(op, params = {}, expectedCharacter) {
-    const allowed = new Set([...SEMANTIC_UI_OPS, ...TOOLS_UI_OPS.filter(op => op !== 'status'),'memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
+    const allowed = new Set([...SEMANTIC_UI_OPS, ...TOOLS_UI_OPS.filter(op => op !== 'status'),'memory.query','memory.detail','memory.correct','memory.suspend','memory.resume','memory.delete','memory.export','memory.settings','memory.migrate','memory.proposals.list','memory.index.rebuild','attention.configure','attention.status','backup.create','backup.inspect','backup.restore.stage','backup.restore.commit','backup.restore.cancel','backup.recovery.status']);
     if (!allowed.has(op)) throw new CapabilityError('PERMISSION_DENIED', '管理操作未开放。');
     const fixed = expectedCharacter !== undefined;
     if (fixed && (!expectedCharacter || typeof expectedCharacter !== 'object' || Array.isArray(expectedCharacter) ||
@@ -193,6 +206,9 @@ export class LocalCapabilities {
       assertTargetReady(current.id);
     };
     checkExpected();
+    // Invalidate the original purpose gate BEFORE binding/IPC can yield. This
+    // lifecycle hook carries no policy cache and does not retire passive chat.
+    if (op === 'attention.configure' && Object.keys(params).length) this.onAttentionChange?.();
     // Capture once. A later current-character lookup cannot silently choose B
     // for an action the user reviewed on A, including during session.bind.
     const binding = fixed ? await this.binding({ kind: 'management' }) : null;

@@ -56,6 +56,20 @@ async function fixture(name) {
 
 try {
   const a = await fixture('source'), b = await fixture('target');
+  await check('attention page reads the authoritative status without defaults or cancellation', async () => {
+    let cancellations = 0; a.local.onAttentionChange = () => { cancellations++; };
+    const params = { enabled: false, daily_limit: 4, cooldown_seconds: 5400, quiet_start: '23:30', quiet_end: '08:30' };
+    const saved = await a.call('attention.configure', params); assert.equal(saved.ok, true); assert.equal(cancellations, 1);
+    const status = await a.call('attention.status'); assert.equal(status.ok, true);
+    for (const [key, value] of Object.entries(params)) assert.equal(status.result.config[key], value);
+    assert.equal(cancellations, 1);
+    assert.equal((await a.call('attention.configure', {})).ok, true); assert.equal(cancellations, 1);
+    assert.match(a.html, /call\('attention.status'\)/); assert.doesNotMatch(a.html, /call\('attention.configure'\)/);
+    assert.match(a.html, /<fieldset id="attentioncontrols" disabled>/);
+    assert.doesNotMatch(a.html.match(/<input id="daily"[^>]+>/)[0], /value=/);
+    assert.doesNotMatch(a.html.match(/<input id="cooldown"[^>]+>/)[0], /value=/);
+    assert.match(a.html, /\$\('attentioncontrols'\)\.disabled=false/);
+  });
   await check('semantic page and management operations retain real host authentication and scoped binding', async () => {
     const url = a.base + '/dsh-surfcore/local-capabilities/semantic';
     assert.equal((await fetch(url)).status, 401);

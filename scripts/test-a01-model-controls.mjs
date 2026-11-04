@@ -47,6 +47,7 @@ await check('QQ/Pet policy is frozen, exact, independently hashed and rejects un
   assert.ok(Object.isFrozen(policy('p').controls)); assert.throws(() => createModelPolicy(selected, 'bili'), e => e.code === 'MODEL_POLICY_INVALID' && Boolean(e.hint));
 });
 await check('factory writes symmetric title/native idle/selection/Pet controls before activation', () => {
+  fs.mkdirSync(path.resolve('.local/evidence/a01-controls-attempt1'), { recursive: true });
   const temp = fs.mkdtempSync(path.resolve('.local/evidence/a01-controls-attempt1/stage-'));
   const seedDir = path.join(temp, 'seed'); fs.mkdirSync(seedDir); fs.writeFileSync(path.join(seedDir, 'selection.json'), JSON.stringify(selected)); fs.writeFileSync(path.join(seedDir, '.credentials.yaml'), 'SYNTHETIC_NOT_A_CREDENTIAL');
   const personaFile = path.join(temp, 'persona'); fs.writeFileSync(personaFile, '合成人格');

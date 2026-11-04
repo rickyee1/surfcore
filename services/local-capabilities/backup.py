@@ -207,10 +207,12 @@ class BackupManager:
         for row in records['revisions']:
             if ('content',hashlib.sha256(row['statement'].encode('utf-8')).hexdigest()) not in fingerprints.get(row['memory'],set()):
                 raise ValueError('missing revision fingerprint')
+        source_proofs = {}
         for row in records['record_source_revisions']:
             if row['memory'] not in memories or row['source'] not in json.loads(memories[row['memory']]['derived']):
                 raise ValueError('proof')
             integer(row['revision'],1,2**53-1)
+            source_proofs.setdefault(row['memory'], {})[row['source']] = row['revision']
         for row in records['episode_consumption']:
             if row['episode'] not in memories:
                 raise ValueError('consumption')
@@ -225,7 +227,7 @@ class BackupManager:
         for row in metadata:
             if row['memory'] not in memories:
                 raise ValueError('metadata orphan')
-            validate_metadata_row(row, memories[row['memory']], records['revisions'])
+            validate_metadata_row(row, memories[row['memory']], records['revisions'], source_proofs.get(row['memory']))
             if ('content', row['content_hash']) not in fingerprints.get(row['memory'], set()):
                 raise ValueError('metadata source fingerprint')
 

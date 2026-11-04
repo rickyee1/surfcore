@@ -142,3 +142,32 @@ Tests: `python scripts/test-local-capabilities-metadata.py` plus affected origin
 service/backend/role-package suites. Historical-reader tests use read-only
 `git show 9f456d24...` from the repository, following the existing T5 fixture pattern;
 they do not depend on ignored evidence or open a real user store.
+
+## Confirmed ordinary assistant output extension, P2 attempt2
+
+The trusted host may call `memory.assistant-output` with the ordinary private QQ
+or Pet binding, the original `expected_memory_epoch`, text/event, nonempty
+`derived_from` and exact `source_revisions`, and private ingress
+`{token, kind: confirmed_assistant_output}`. This entry is excluded from browser,
+management, agent and Writer dispatch. Generic ingest/propose cannot use this
+kind. Existing original-user/assistant ingress still rejects derived sources.
+
+The host attests an actually confirmed ordinary output at whole-turn closure.
+It includes all actual input and retrieval dependencies, preserves the original
+role/audience/persona/turn guard, and commits once while holding its original
+Writer lease. Cleanup then runs independently. Unknown/failed/partially
+unconfirmed or tool-localOnly results cannot use this entry. Duplicate close
+and cleanup retry never resend or recommit. Disabled auto-write saves no body.
+
+Projection adds `statement_origin: confirmed_output`, `source_speaker.role:
+assistant`, and verbatim true only for the exact original output revision/frame.
+The service receipt clock means first accepted output ingress at closure.
+It is not a platform delivery clock or user activity time. The frame also binds
+the complete dependency ID/revision map. Missing proofs invalidate the frame.
+Known ancestor correction retires descendant metadata in the same transaction,
+so an older reader cannot restore the old confirmed frame by changing revisions. Current recursive source/revision governance applies
+before material/query projection. Correcting/deleting an input or retrieved
+fact retires the assistant paraphrase too. Assistant speech remains attributed
+to the assistant and cannot become an owner statement or timeless user fact.
+Old or missing metadata remains conservative. Export and backup use the same
+frame validator, including the new source kind, without a schema/version bump.

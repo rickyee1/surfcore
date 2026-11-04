@@ -79,6 +79,21 @@ try {
     await rejects(local.ingest(pub, 'bad', '外部不是用户', { original: true, actor: 'user' }), 'PERMISSION_DENIED');
     assert.equal(operations.slice(before).filter(op => op === 'memory.ingest' || op === 'memory.ingress.open').length, 0);
   });
+  await check('confirmed assistant utterance retains source closure without becoming owner fact', async () => {
+    await reset();
+    const source = await seed('明天面试准备的是旧项目');
+    const context = await local.context(pet);
+    const reply = await local.ingestConfirmedOutput(context, 'confirmed-reply', '我答应明天和你继续准备旧项目面试。', { sources: [{ id: source.id, revision: 1 }], guard: () => {} });
+    const first = await snapshot();
+    const item = first.engineItems.find(item => first.proofs[item.id].id === reply.id);
+    assert.equal(item.kind, 'self');
+    assert.equal(first.context.records.find(row => row.id === reply.id).source_metadata.statement_origin, 'confirmed_output');
+    await local.management('memory.correct', { id: source.id, expected_revision: 1, statement: '取消旧项目面试' });
+    const corrected = await snapshot();
+    assert.ok(!corrected.engineItems.some(item => /我答应/.test(item.text)));
+    assert.ok(!corrected.context.records.some(row => row.id === reply.id));
+    await rejects(adapter.validate(first), 'STALE_CONTEXT');
+  });
   await check('Pet original plan reaches shared QQ and pure derive/form/mine/select without Bili', async () => {
     await reset(); await local.shareOwner(true); await seed('明天我有面试，有点紧张');
     const result = await snapshot({ channel: qq }); assert.equal(result.engineItems.length, 1);

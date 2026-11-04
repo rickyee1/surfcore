@@ -21,6 +21,26 @@ export function id(value) { if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(value || ''))
 function string(value, max = 1000) { if (typeof value !== 'string' || Buffer.byteLength(value) > max) throw fail(); }
 function digest(value) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw fail(); }
 function bounded(value, max = Number.MAX_SAFE_INTEGER) { if (!Number.isSafeInteger(value) || value < 0 || value > max) throw fail(); }
+export function validatePurposeReplay(value) {
+  exact(value, ['terminals', 'bodyHashes']);
+  if (!value.terminals || typeof value.terminals !== 'object' || Array.isArray(value.terminals) || Object.keys(value.terminals).length > 10000 ||
+      !Array.isArray(value.bodyHashes) || value.bodyHashes.length > 10000 || new Set(value.bodyHashes).size !== value.bodyHashes.length) throw fail();
+  for (const [key, outcome] of Object.entries(value.terminals)) { digest(key); if (!['unknown', 'done', 'consumed'].includes(outcome)) throw fail(); }
+  for (const key of value.bodyHashes) digest(key);
+  return value;
+}
+export function mergePurposeReplay(...values) {
+  const terminals = {}, bodies = new Set();
+  for (const value of values) {
+    validatePurposeReplay(value);
+    for (const [key, outcome] of Object.entries(value.terminals)) {
+      const previous = terminals[key];
+      terminals[key] = [previous, outcome].includes('unknown') ? 'unknown' : [previous, outcome].includes('done') ? 'done' : 'consumed';
+    }
+    for (const key of value.bodyHashes) bodies.add(key);
+  }
+  return validatePurposeReplay({ terminals, bodyHashes: [...bodies].sort() });
+}
 export function validatePayload(value) {
   exact(value, ['schema', 'packageId', 'sourceCharacterId', 'sourceRevision', 'persona', 'snapshot', 'platformState', 'assets', 'exclusions']);
   if (value.schema !== 1 || !/^[a-f0-9]{32}$/.test(value.packageId)) throw fail();
@@ -51,7 +71,9 @@ export function validatePayload(value) {
   exact(manifest.counts, ['memories', 'revisions', 'fingerprints', 'tombstones', 'record_source_revisions', 'episode_consumption']);
   let count = 0; for (const number of Object.values(manifest.counts)) { bounded(number, 50000); count += number; } if (count > 50000) throw fail();
   string(manifest.lineage, 200); if (typeof manifest.source_requires_review !== 'boolean' || !Number.isFinite(manifest.created_at)) throw fail();
-  exact(value.platformState, ['schema', 'sourceTimezone', 'capturedAt', 'attentionRevision', 'unanswered', 'intensity', 'events']);
+  const summaryKeys = ['schema', 'sourceTimezone', 'capturedAt', 'attentionRevision', 'unanswered', 'intensity', 'events'];
+  if (Object.hasOwn(value.platformState, 'purpose')) { summaryKeys.push('purpose'); validatePurposeReplay(value.platformState.purpose); }
+  exact(value.platformState, summaryKeys);
   const state = value.platformState;
   if (state.schema !== 1 || !['UTC', 'Asia/Shanghai'].includes(state.sourceTimezone) || !Array.isArray(state.events) || state.events.length > 50000) throw fail();
   bounded(state.capturedAt); bounded(state.attentionRevision); bounded(state.unanswered);

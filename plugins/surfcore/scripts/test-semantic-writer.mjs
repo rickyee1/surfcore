@@ -155,7 +155,10 @@ try {
     const pending = writer.flush().catch(error => error); while (!calls.length) await tick();
     const chat = createPetChatService({ ctx, stateDir: path.join(temp, 'pet', character.id), capabilities: local });
     const started = Date.now(); const result = await chat.chat({ text: '普通用户这轮正在说话', modality: 'text' }); assert.equal(result.ok, true, JSON.stringify(result)); assert.match(result.reply.text, /普通聊天已经正常完成/); assert.ok(Date.now() - started < 2000);
-    assert.equal((await pending).code, 'WRITER_DEFERRED'); release(); await tick(); assert.equal(writes().length, 0); assert.equal(writer.status().foreground, 0);
+    assert.equal((await pending).code, 'WRITER_DEFERRED'); release(); await tick(); assert.equal(writes().length, 0);
+    assert.equal(writer.status().foreground, 1, 'ordinary model return still awaits actual delivery');
+    await chat.validateDelivery(result); chat.validateDeliverySync(result); await chat.finishDelivery(result, 'sent');
+    assert.equal(writes().length, 0); assert.equal(writer.status().foreground, 0);
   });
   await check('actual QQ prepare/source handles hold until real mux send/finally, then permit Writer; prepare errors release', async () => {
     await reset(); await local.setQqOwner({ account: '999', peer: '123' });

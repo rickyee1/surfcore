@@ -27,7 +27,9 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { composePersonaLayers } from '../../../src/persona-layers.js';
+import { buildPersonaIdentity, personaNameFromCard } from '../../../src/persona-identity.js';
 import { fileURLToPath } from 'node:url';
 import {
   ALIGN_FILE, BACKUP_DIR, BILI_AI_DIR, BILI_ALIGNMENT_FILE, BILI_CONFIG, BILI_CRED, BILI_DIR, BILI_MJS,
@@ -84,7 +86,7 @@ import { createPetPurposeService } from './pet-purpose.js';
 import { createPetApiService } from './pet-api.js';
 import { createUpdatesService, resumePendingApply } from './updates.js';
 import {
-  adminFromSources, adminSummary, normalizeAdmin, projectAdminSave,
+  adminFromSources, adminFromQqConfig, adminSummary, normalizeAdmin, projectAdminSave,
 } from '../../../src/admin-identity.js';
 import {
   applyMemoryCardAction, compactMemoryCardNow, fullMemoryCardSnapshot, memoryCardIdle, memoryCardSnapshot,
@@ -732,7 +734,15 @@ export function apply(ctx) {
   const writerHandler = createWriterHandler(semanticWriter);
   route('exact', `${API_PREFIX}/local-capabilities/writer/status`, writerHandler);
   route('exact', `${API_PREFIX}/local-capabilities/writer/run`, writerHandler);
-  const localChannel = createChannelHandler({ capabilities: local, keyFile: path.join(LOCAL_ROOT, 'channel.key') });
+  function currentQqPersona(channel, mode = 'v1') {
+    const core = readPersonaLayerText('core');
+    const sceneId = channel.kind === 'qq-group' ? 'qq-group' : 'qq-private';
+    return composePersonaLayers({ core, tone: readPersonaLayerText('tone'), daily: readPersonaLayerText('daily'),
+      scene: readPersonaLayerText('scene', sceneId), sceneId, mode: mode === 'v2' ? 'v2' : 'v1', personaMode: channel.kind === 'qq-group' ? 'tone' : 'full',
+      identity: buildPersonaIdentity({ name: personaNameFromCard(core, readCurrentCharacter()?.name || '这个角色'), owner: adminFromQqConfig(readQqConfig().config)?.displayName || '主人' }),
+      maxChars: Math.min(20000, Math.max(1000, Math.round(Number(readQqConfig().config?.role?.maxInjectChars) || 6000))) }).text;
+  }
+  const localChannel = createChannelHandler({ capabilities: local, keyFile: path.join(LOCAL_ROOT, 'channel.key'), getPersona: currentQqPersona });
   localChannel.deliverTool = createToolBridgeDelivery({ channelHandler: localChannel, callBridge });
   const localManagement = createManagementHandler({ capabilities: local, base: '/dsh-surfcore/local-capabilities' });
   route('exact', '/dsh-surfcore/local-capabilities', localManagement);
@@ -751,13 +761,20 @@ export function apply(ctx) {
   route('exact', `${API_PREFIX}/bili/drafts/read`, biliDraftHandler);
   route('exact', `${API_PREFIX}/bili/drafts/generate`, biliDraftHandler);
   companion = createAutonomousCompanion({
-    ctx, capabilities: local, channelHandler: localChannel, stateDir: path.join(LOCAL_ROOT, 'companion'), callBridge, tokenBudget,
+    ctx, capabilities: local, channelHandler: localChannel, stateDir: path.join(LOCAL_ROOT, 'companion'), callBridge, tokenBudget, pet: petChat,
     environment: () => ({ roleActive: readJson(path.join(QQ_STATE_DIR(), 'current-role.json'), { mode: 'active' })?.mode === 'active', focused: petChat.focusEnabled(), paused: false, platformEnabled: readUnified().config?.platforms?.start?.qq === true }),
-    persona: () => [readPersonaLayerText('core'), readPersonaLayerText('tone')].filter(Boolean).join('\n'),
+    persona: carrier => {
+      if (carrier === 'pet') return petChat.personaSnapshot();
+      const role = local.currentCharacter(), text = currentQqPersona({ kind: 'qq-private' });
+      return { ...role, text, hash: createHash('sha256').update(text).digest('hex') };
+    },
     purposeConfig: () => readQqConfig().config?.purpose || {},
     log: pluginLog,
   });
   const companionHandler = createCompanionHandler(companion);
+  local.onAttentionChange = () => companion.cancelPending();
+  localChannel.onInput = input => companion.noteInput(input);
+  petChat.setPurposeObserver(input => companion.noteInput(input));
   for (const action of ['status', 'config', 'preview', 'run', 'stop']) route('exact', `${API_PREFIX}/companion/${action}`, companionHandler);
 
   // ── 概览 ────────────────────────────────────────────────────────────────
@@ -786,6 +803,7 @@ export function apply(ctx) {
       ok: true,
       version: VERSION,
       privacyPolicyVersion: PRIVACY_POLICY_VERSION,
+      purposeBackend: local.mode,
       bridge,
       bili,
       memory,
@@ -2414,6 +2432,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
 
   async function handlePurpose(req, res, url) {
     const suffix = url.pathname.slice(`${API_PREFIX}/purpose`.length) || '/status';
+    if (local.guarded && suffix !== '/pet-chat') return companionHandler(req, res);
     const method = String(req.method || 'GET').toUpperCase();
     const carrier = readQqConfig().config?.purpose?.carrier === 'pet' ? 'pet' : 'qq';
     const availability = await purposeAvailability();
@@ -2831,6 +2850,13 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
       return;
     }
     // 目的机制：状态 / 只读预览 / 立刻试一次（真发，设置页会先 confirm）。
+    if (local.guarded && ['purpose-status', 'purpose-preview', 'purpose-run'].includes(action)) {
+      try {
+        const result = action === 'purpose-status' ? await companion.status() : action === 'purpose-preview' ? await companion.preview() : await companion.run();
+        json(res, result.ok ? 200 : 409, result);
+      } catch (error) { json(res, 409, { ok: false, code: error.code || 'COMPANION_UNAVAILABLE', error: error.error || error.message, hint: error.hint || '打开目的页刷新并核对状态。' }); }
+      return;
+    }
     if (action === 'purpose-status') {
       const result = await callBridge('/api/purpose/status', { timeoutMs: 8000 });
       json(res, result.status || 200, result.data ?? { ok: result.ok, error: result.error });

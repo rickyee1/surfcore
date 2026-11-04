@@ -2594,6 +2594,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
     }
 
     function PurposeTab({ qq, setQq, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
+      if (['local', 'paused'].includes(overview?.purposeBackend)) return h(CompanionCard, { endpoint: '/purpose' });
       return h("div", null,
         h("div", { className: "qbw-infobox" },
           "「目的」现在是一个独立栏目：管小肥鱼什么时候主动找你、想说什么；载体可选桌宠或 QQ。",
@@ -3468,7 +3469,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         }) : null);
     }
 
-    function CompanionCard() {
+    function CompanionCard({ endpoint = '/companion' } = {}) {
       const [data, setData] = useState(null);
       const [form, setForm] = useState(null);
       const [error, setError] = useState(null);
@@ -3494,9 +3495,9 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const refresh = useCallback(async (clearError = false) => {
         const version = ++statusVersion.current;
         if (clearError === true) setError(null);
-        try { const result = await request("/companion/status"); if (version === statusVersion.current) applyStatus(result); }
+        try { const result = await request(`${endpoint}/status`); if (version === statusVersion.current) applyStatus(result); }
         catch (e) { if (version === statusVersion.current) failure(e); }
-      }, [applyStatus, request]);
+      }, [applyStatus, request, endpoint]);
       useEffect(() => { void refresh().finally(() => setWorking("")); }, [refresh]);
       useEffect(() => {
         const timer = setInterval(() => { void refresh(); }, 10000);
@@ -3505,46 +3506,57 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const edit = (key, value) => { dirty.current = true; setForm((old) => ({ ...old, [key]: value })); };
       const save = async () => {
         setWorking("save"); setError(null); setNotice("");
-        try { const result = await request("/companion/config", { method: "POST", body: form }); applyStatus(result, true); setNotice(result.config.enabled ? "已启用：只向绑定主人私聊，仍受统一注意力限制。" : "已保存，当前保持关闭。"); }
+        try { const result = await request(`${endpoint}/config`, { method: "POST", body: form }); applyStatus(result, true); setNotice(result.config.enabled ? "已启用，按统一注意力限制通过所选载体联系主人。" : "已保存，当前保持关闭。"); }
         catch (e) { failure(e); } finally { setWorking(""); }
       };
       const readPreview = async () => {
         setWorking("preview"); setError(null); setNotice(""); setPreview(null);
-        try { setPreview(await request("/companion/preview", { method: "POST", body: {} }, 75000)); }
+        try { setPreview(await request(`${endpoint}/preview`, { method: "POST", body: {} }, 75000)); }
         catch (e) { failure(e); } finally { setWorking(""); }
       };
       const run = async () => {
         setWorking("run"); setError(null); setNotice("正在执行一轮；符合所有限制时，可能私聊绑定主人。");
-        try { await request("/companion/run", { method: "POST", body: {} }, 240000); setNotice("本轮已完成，请查看最近结果。"); }
+        try { await request(`${endpoint}/run`, { method: "POST", body: {} }, 240000); setNotice("本轮已完成，请查看最近结果。"); }
         catch (e) { failure(e); setNotice(""); }
         finally { setWorking(""); await refresh(); }
       };
       const stop = async () => {
         setStopping(true); setError(null);
-        try { const result = await request("/companion/stop", { method: "POST", body: {} }); applyStatus(result, true); setNotice("已关闭并取消在途轮次；已提交平台的消息请以最近结果为准，不会自动补发。"); }
+        try { const result = await request(`${endpoint}/stop`, { method: "POST", body: {} }); applyStatus(result, true); setNotice("已关闭主动联系并取消在途目的。普通聊天继续可用；已提交平台的消息请核对实际回执。"); }
         catch (e) { failure(e); } finally { setStopping(false); }
       };
       const link = (bvid, title) => /^BV[1-9A-HJ-NP-Za-km-z]{10}$/.test(String(bvid || ""))
         ? h("a", { href: `https://www.bilibili.com/video/${bvid}`, target: "_blank", rel: "noopener noreferrer" }, title || bvid)
         : h("span", null, title || "（无有效来源链接）");
       const last = data?.last;
-      const outcome = last?.outcome === "pending" && !data?.running ? "上轮结果待核对（不会补发）" : ({ pending: "处理中", sent: "已发给主人", failed: "失败，未补发", unknown: "结果未确认（不会补发）" }[last?.outcome] || last?.outcome || "尚未运行");
+      const outcome = last?.outcome === "pending" && !data?.running ? "上轮结果待核对（不会补发）" : ({ pending: "处理中", sent: "已发给主人", failed: "失败，未补发", unknown: "结果未确认（不会补发）", skipped: "本轮未联系" }[last?.outcome] || last?.outcome || "尚未运行");
       const problem = error || data?.error;
       const disabled = Boolean(working || stopping || data?.running);
       const source = preview?.source;
       return h("div", { className: "qbw-card", style: { width: "100%", boxSizing: "border-box", marginBottom: "10px" } },
-        h("h4", null, "自主浏览与主人私聊"),
-        h("p", null, "自主浏览 B站公开内容、形成想法，再按限制私聊已绑定主人。有值得说的想法即可联系，无需空闲30分钟；正在对话时暂停，新消息会取消旧想法。不会通过这里发布 B站评论、动态或私信。"),
+        h("h4", null, "主动目的与主人联系"),
+        h("p", null, "从当前人格、允许的 QQ/桌宠经历及有效待续形成具体目的。B站提供可选公开素材；没有新视频时仍可思考。无需空闲30分钟；正在对话时暂停，新消息会取消旧想法。"),
         h("div", { className: "qbw-kv" }, h("span", null, "当前状态"), h("span", null, data ? `${data.config?.enabled ? "已开启" : "已关闭"} · ${data.running || working === "run" ? "运行中" : "空闲"}` : "读取中…")),
         h("div", { className: "qbw-kv" }, h("span", null, "下次浏览"), h("span", null, data?.nextBrowseAt ? fmtTime(data.nextBrowseAt) : "尚未排定")),
+        h("div", { className: "qbw-kv" }, h("span", null, "下次目的检查"), h("span", null, data?.nextPurposeAt ? fmtTime(data.nextPurposeAt) : "尚未排定")),
+        data?.notice ? h("p", { className: "qbw-hint" }, data.notice) : null,
+        data?.reader?.ok === false ? h("div", { role: "alert", className: "qbw-err" }, [data.reader.code, data.reader.error, data.reader.hint].filter(Boolean).join(" · ")) : null,
         h("div", { className: "qbw-kv" }, h("span", null, "最近结果"), h("span", null, last ? `${fmtTime(last.at)} · ${outcome}` : outcome)),
+        last?.reason ? h("p", { className: "qbw-hint" }, ({ "no-purpose": "当前没有合适目的。", "model-skip": "模型决定本轮不联系。", "duplicate-text": "这段正文已有尝试记录，本轮跳过。" }[last.reason] || last.reason)) : null,
         last?.bvid ? h("p", null, "上次来源：", link(last.bvid), last.basis ? h("span", { className: "qbw-hint" }, ` · ${last.basis}`) : null) : null,
         last && (last.materialStored === false || last.thoughtStored === false) ? h("p", { className: "qbw-hint" }, "本轮自动写入关闭，未声称材料或想法已保存。") : null,
         data && !data.local ? h("p", { className: "qbw-hint" }, "当前未使用 local 后端，执行前请先检查本地能力。") : null,
-        h("p", { className: "qbw-hint" }, "统一注意力中的主动联系开关也需开启；安静时段、专注、冷却、预算和主人白名单始终生效。", " ", h("a", { href: "/dsh-surfcore/local-capabilities", target: "_blank", rel: "noopener noreferrer" }, "打开本地能力管理")),
+        h("p", { className: "qbw-hint" }, `限制来自统一注意力账本，今日已计 ${data?.attention?.today_count ?? 0} 次。闲置门槛为0，手动运行同样遵守安静、专注、前台、预算和冷却。`),
+        data?.attention ? h("p", { className: "qbw-hint" }, `当前有效每日额度 ${data.attention.effective_daily_limit} 次；冷却截止 ${data.attention.cooldown_until_ms ? fmtTime(data.attention.cooldown_until_ms) : "尚无"}；时区 ${data.attention.config.timezone}。`) : null,
+        h("p", { className: "qbw-hint" }, "每轮只使用一个主载体，QQ仅联系已绑定主人。", h("a", { href: "/dsh-surfcore/local-capabilities", target: "_blank", rel: "noopener noreferrer" }, "查看本地能力")),
         form ? h("div", null,
-          h("label", { className: "qbw-kv" }, h("span", null, "启用（仅绑定主人 QQ 私聊）"), h("input", { type: "checkbox", checked: form.enabled === true, disabled, onChange: (e) => edit("enabled", e.target.checked) })),
-          [["intervalMinutes", "浏览间隔（分钟）", 5, 1440], ["dailyMax", "每天最多主动尝试", 1, 20], ["cooldownMinutes", "联系冷却（分钟）", 5, 10080]].map(([key, label, min, max]) => h("label", { className: "qbw-kv", key }, h("span", null, label), h("input", { className: "qbw-input", type: "number", "aria-label": label, min, max, step: 1, value: form[key], disabled, onChange: (e) => edit(key, Number(e.target.value)), style: { width: "150px", boxSizing: "border-box" } }))),
+          h("label", { className: "qbw-kv" }, h("span", null, "启用主动联系"), h("input", { type: "checkbox", checked: form.enabled === true, disabled, onChange: (e) => edit("enabled", e.target.checked) })),
+          h("label", { className: "qbw-kv" }, h("span", null, "主载体"), h("select", { value: form.carrier, disabled, onChange: e => edit("carrier", e.target.value) }, h("option", { value: "qq" }, "QQ 主人私聊"), h("option", { value: "pet" }, "桌宠"))),
+          h("label", { className: "qbw-kv" }, h("span", null, "桌宠形式"), h("select", { value: form.petModality, disabled, onChange: e => edit("petModality", e.target.value) }, h("option", { value: "text" }, "文字"), h("option", { value: "voice" }, "语音（需已有输出许可）"))),
+          h("label", { className: "qbw-kv" }, h("span", null, "桌宠明确离线时尝试 QQ"), h("input", { type: "checkbox", checked: form.petFallbackToQQ === true, disabled, onChange: e => edit("petFallbackToQQ", e.target.checked) })),
+          h("label", { className: "qbw-kv" }, h("span", null, "读取可选 B站公开素材"), h("input", { type: "checkbox", checked: form.readerEnabled === true, disabled, onChange: e => edit("readerEnabled", e.target.checked) })),
+          [["intervalMinutes", "浏览间隔（分钟）", 1, 1440], ["purposeIntervalMinutes", "目的检查间隔（分钟）", 1, 1440], ["dailyMax", "每日主动额度", 0, 100], ["cooldownMinutes", "联系冷却（分钟）", 0, 10080]].map(([key, label, min, max]) => h("label", { className: "qbw-kv", key }, h("span", null, label), h("input", { className: "qbw-input", type: "number", "aria-label": label, min, max, step: 1, value: form[key], disabled, onChange: (e) => edit(key, Number(e.target.value)), style: { width: "150px", boxSizing: "border-box" } }))),
+          [["quietStart", "安静开始"], ["quietEnd", "安静结束"]].map(([key, label]) => h("label", { className: "qbw-kv", key }, h("span", null, label), h("input", { type: "time", value: form[key] || "", disabled, onChange: e => edit(key, e.target.value) }))),
           h(Btn, { onClick: save, disabled }, working === "save" ? "保存中…" : form.enabled ? "保存并启用（仅主人私聊）" : "保存设置（保持关闭）")) : null,
         h("div", { className: "qbw-actions" },
           h(Btn, { kind: "qbw-btn2", onClick: () => refresh(true), disabled: Boolean(working && working !== "run") || stopping }, "刷新状态"),
@@ -3553,6 +3565,10 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           h(Btn, { kind: "qbw-btn2", onClick: stop, disabled: stopping || Boolean(working && working !== "run") || (!data?.config?.enabled && !data?.running && working !== "run") }, stopping ? "停止中…" : "停止并关闭")),
         notice ? h("p", { role: "status", className: "qbw-hint" }, notice) : null,
         problem ? h("div", { role: "alert", className: "qbw-err" }, [problem.code, problem.error, problem.hint].filter(Boolean).join(" · ")) : null,
+        preview ? h("div", { className: "qbw-hint" }, h("h4", null, "本轮为什么联系"),
+          h("p", null, preview.purpose?.text || "当前没有合适目的，本轮将跳过。"),
+          h("p", null, `载体 ${preview.carrier || "未知"} · ${preview.coverage?.temporal_count ?? 0} 条当前材料 · ${preview.coverage?.background_count ?? 0} 条常驻背景`),
+          h("p", null, preview.coverage?.notice || "仅当前普通受众的有界投影。")) : null,
         source ? h("div", { style: { marginTop: "10px" } },
           h("h4", null, "公开材料预览（不调用模型，不发送）"),
           link(source.bvid, source.title),
@@ -3721,7 +3737,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           overview,
         }),
         accountCard,
-        h(CompanionCard),
+        h("div", { className: "qbw-infobox" }, "B站提供可选公开素材。主动联系的载体、限制、预览和运行统一在「目的」页。"),
         h(BiliDraftCard),
         h(AdminCard, { admin, onChange: setAdmin, qqPrivate, qqAllowAll, toast }),
         h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
@@ -6360,7 +6376,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;
     // 仅供 Node 契约及组件渲染测试；浏览器运行时不使用。
-    exports.__test = { pathKeys, setPath, BiliTab, CompanionCard };
+    exports.__test = { pathKeys, setPath, BiliTab, CompanionCard, PurposeTab };
     return module.exports;
   },
 });

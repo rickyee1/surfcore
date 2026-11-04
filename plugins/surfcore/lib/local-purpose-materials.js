@@ -80,7 +80,8 @@ function attribution(record) {
   const metadata = record.source_metadata || {};
   const role = metadata.source_speaker?.role || 'unknown';
   const statementOrigin = metadata.statement_origin || 'unknown';
-  const original = statementOrigin === 'original' && metadata.verbatim === true && !(record.derived_from || []).length;
+  const original = metadata.verbatim === true && (statementOrigin === 'original' && !(record.derived_from || []).length ||
+    statementOrigin === 'confirmed_output' && role === 'assistant' && (record.derived_from || []).length > 0);
   const owner = original && role === 'user' && metadata.source_speaker.owner_at_receive === true &&
     !record.audience_scope?.startsWith('qq:group:');
   return { role, statementOrigin, verbatim: original, owner,

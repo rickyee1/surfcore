@@ -58,6 +58,13 @@ const tests = [
   // 目的机制（主动找主人）：从近期 QQ+B站 记忆提炼目的、安静时段/每日上限/重试/去重，
   // 以及真实 bridge.js 里的预览/投递/发送回执/回合回执接线（VM 夹具，不连真 QQ）。
   'test-purpose-engine.mjs', 'test-purpose-wiring.mjs',
+  'test-local-attention-status.mjs',
+  'test-local-assistant-output.mjs',
+  'test-purpose-role-package.mjs', 'test-local-purpose-persona.mjs',
+  '../plugins/surfcore/scripts/test-local-purpose-materials.mjs',
+  '../plugins/surfcore/scripts/test-local-purpose-planner.mjs',
+  '../plugins/surfcore/scripts/test-local-purpose-coordinator.mjs',
+  'test-a01-model-controls.mjs', 'test-a01-observer-protocol.mjs', 'test-a01-writer-policy.mjs',
   // 对话收尾判断：自己/对方继续意愿、话题闭环、未答提问先答、收尾≠潜水、
   // 冷却只压普通概率唤醒；以及真实 bridge.js 的 close 接口/提示词/重开接线
   // （VM 夹具，不连真 QQ）。
@@ -224,7 +231,7 @@ let failed = 0;
 for (const test of tests) {
   console.log(`\nRunning ${test}`);
   const result = spawnSync(process.execPath, [path.join(root, 'scripts', test)], {
-    cwd: root, stdio: 'inherit', timeout: 60000,
+    cwd: root, stdio: 'inherit', timeout: test === 'test-companion-activity.mjs' ? 120000 : 60000,
     env: { ...process.env, QQ_BRIDGE_TEST_LIVE: '0' },
   });
   if (result.status !== 0 || result.error) {

@@ -3104,6 +3104,13 @@ async function main() {
       reason: { code: cleanup.code, message: cleanup.error }, recommendation: cleanup.hint,
       dedupeKey: `local-cleanup:${cleanup.code}`, confidence: 'confirmed' });
   }
+  function noteLocalOutputMemory(result) {
+    if (result?.ok !== false) return;
+    appendActivity(`[local-output-memory] ${result.code} ${result.error} ${result.hint}`);
+    gateEvents.record({ gate: 'local-channel', kind: 'fault', event: 'local-assistant-memory-failed', action: 'blocked',
+      reason: { code: result.code, message: result.error }, recommendation: result.hint,
+      dedupeKey: `local-output-memory:${result.code}`, confidence: 'confirmed' });
+  }
   const originalStopSessionWork = api.stopSessionWork.bind(api);
   api.stopSessionWork = async (sessionId, ...rest) => {
     const [cleanup, stopped] = await Promise.allSettled([
@@ -3125,8 +3132,15 @@ async function main() {
       st.agentToken = crypto.randomBytes(24).toString('hex'); rememberAgentToken(key, st.agentToken);
       st.unread = []; st.recentMessages = []; st.pendingThoughts = []; st.activeTopics = []; st.memberImpressions = {};
     }
-    const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', readPersonaLayerText('core', 'qq') || '', {
+    const personaMode = key.startsWith('group:') ? 'tone' : 'full';
+    const mode = currentMode === 'reserved2' ? 'v2' : 'v1';
+    const persona = composedRoleHint(mode, key, personaMode);
+    const personaCheck = () => {
+      if (persona !== composedRoleHint(mode, key, personaMode)) throw channelError('STALE_PERSONA', '本轮原人格层已变化。', '按当前角色重新发起回合。');
+    };
+    const prompt = await localChannels.prepare(key, args.sessionId, st?.agentToken || '', persona, {
       signal: args.signal,
+      personaCheck, personaMode: mode,
       onNotice: async phase => {
         const notice = phase === 'loading'
           ? '正在准备本机记忆，首次加载可能需要稍等，最多两分钟。准备完成后会继续回答这条消息。'
@@ -3139,7 +3153,7 @@ async function main() {
       const error = channelError('TURN_SUPERSEDED', '提示准备期间回合已被新入站接管。');
       throw localChannels.reportCleanup(error, await localChannels.endSession(args.sessionId));
     }
-    try { localChannels.assertReady(packageGate); localChannels.assertPrepared(args.sessionId); return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
+    try { personaCheck(); localChannels.assertReady(packageGate); localChannels.assertPrepared(args.sessionId); return await originalSessionPrompt({ ...args, content: [{ type: 'text', text: prompt }] }, ...rest); }
     catch (error) {
       const cleanup = await localChannels.endSession(args.sessionId);
       throw localChannels.reportCleanup(error, cleanup);
@@ -4338,8 +4352,11 @@ async function main() {
           res.end(JSON.stringify(value, null, 2));
         };
         if (localBackendGuarded() && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) && obj.ok !== false) {
-          void localChannels.validateOrigin().then(() => {
-            if (url.pathname === '/api/socialV2/close' && obj.ok === true && !obj.blocked && !obj.alreadyClosed && Number.isFinite(obj.closedAt)) localChannels.acknowledgeOrigin({ closedAt: obj.closedAt });
+          void localChannels.validateOrigin().then(async () => {
+            if (url.pathname === '/api/socialV2/close' && obj.ok === true && !obj.blocked && !obj.alreadyClosed && Number.isFinite(obj.closedAt)) {
+              obj.memory = await localChannels.completeOriginOutput(); noteLocalOutputMemory(obj.memory);
+              localChannels.acknowledgeOrigin({ closedAt: obj.closedAt });
+            }
             emit(obj, status);
           }, error => emit({ ok: false, code: error.code, error: error.message, hint: error.hint }, 409));
         } else emit(obj, status);
@@ -5569,8 +5586,8 @@ async function main() {
               syncGuard: companionSendGuardSync,
               deliver: (message, key) => onebotSend('private', key.split(':')[1], message),
             });
-            sendJson({ ok: true, outcome: 'sent', delivery: { messageId: delivery?.message_id ?? null } });
-          } catch (e) { sendJson({ ok: false, code: e.code || 'COMPANION_DELIVERY_UNKNOWN', outcome: e.deliveryOutcome || 'unknown', error: e.error || '主动投递结果未确认，本轮不会重发。', hint: e.hint || '核对平台实际消息；本轮不会重放或切换渠道。' }, 409); }
+            sendJson({ ok: true, outcome: 'sent', delivery: { messageId: delivery?.message_id ?? null, activity: delivery?.purposeReceipt || null } });
+          } catch (e) { sendJson({ ok: false, code: e.code || 'COMPANION_DELIVERY_UNKNOWN', outcome: e.deliveryOutcome || 'unknown', attempted: e.transportAttempted === true, error: e.error || '主动投递结果未确认，本轮不会重发。', hint: e.hint || '核对平台实际消息；本轮不会重放或切换渠道。' }, 409); }
           return;
         }
         // ── 目的机制：状态 / 预览 / 立刻试一次（控制台专用，智能体不可见）─────
@@ -12710,7 +12727,7 @@ async function main() {
     return buildPersonaIdentity({ name: personaNameFromCard(roleRawContent(), selfDisplayName || '这个角色'), owner });
   }
 
-  function roleHintForMode(mode, key = '', personaMode = 'full') {
+  function composedRoleHint(mode, key = '', personaMode = 'full') {
     const core = roleRawContent();
     const sceneId = personaSceneFromKey(key);
     const scene = sceneId ? readPersonaLayerText('scene', sceneId) : '';
@@ -12720,7 +12737,10 @@ async function main() {
     const composed = composePersonaLayers({
       core, scene, daily, tone, identity, personaMode, mode, maxChars: roleInjectMaxChars, sceneId,
     });
-    const base = composed.text || '';
+    return composed.text || '';
+  }
+  function roleHintForMode(mode, key = '', personaMode = 'full') {
+    const base = composedRoleHint(mode, key, personaMode);
     // B站记忆单独追加：不受人格卡 6000 字上限影响（上限只保护角色卡本身）。
     // 这样群友问起 B 站经历时，她知道那就是自己的 B站账号，而不是“另一个人”。
     const biliBrief = cfg.biliBridge?.enabled && cfg.biliBridge?.memory?.enabled !== false
@@ -16048,7 +16068,10 @@ async function main() {
                   }
                 }
               }
-              } finally { noteLocalCleanup(await localChannels.endSession(frame.sessionId)); }
+              } finally {
+                if (ended.reason?.kind === 'completed') noteLocalOutputMemory(await localChannels.completeOutput(frame.sessionId));
+                noteLocalCleanup(await localChannels.endSession(frame.sessionId));
+              }
             }
           } else if ((frame.type === 'question/requested' || frame.type === 'approval/requested') && learnerSessions.has(frame.sessionId)) {
             // 黑话学习会话不应向用户提问/请求审批；自动跳过，避免阻塞学习任务。
@@ -16175,7 +16198,9 @@ async function main() {
         if (!segments) throw channelError('INVALID_REQUEST', '本地发送只接受明确的消息段。');
         return onebotSendSegments(kind, id, segments);
       }
-      return localChannels.send(`${kind}:${id}`, () => deliver(id, ...args));
+      const message = args[0];
+      const outputText = typeof message === 'string' ? message : Array.isArray(message) && message.every(part => part.type === 'text') ? message.map(part => part.data?.text || '').join('') : undefined;
+      return localChannels.send(`${kind}:${id}`, () => deliver(id, ...args), outputText);
     };
   }
   bot.onPrivateMessage(async (event) => {

@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { CapabilityError } from './supervisor.js';
-import { LAYERS, EXCLUSIONS, MAX_PACKAGE, canonical, id, openPackage, sealPackage, sha256 } from './role-package-format.js';
+import { LAYERS, EXCLUSIONS, MAX_PACKAGE, canonical, id, openPackage, sealPackage, sha256, mergePurposeReplay } from './role-package-format.js';
 import { packageArea, targetMarker } from '../../../../src/role-package-gate.js';
 
 export const ROLE_PACKAGE_OPS = Object.freeze(['export.prepare', 'export.commit', 'import.inspect', 'import.stage', 'import.commit', 'import.status', 'import.cancel', 'recovery.inspect', 'recovery.commit', 'review', 'diagnostics'].map(name => `role.package.${name}`));
@@ -44,7 +44,7 @@ function readJson(file, fallback) {
 }
 
 /** Fixed host coordinator. No raw Python op, path, identity override or factory is exposed to browser callers. */
-export function createRolePackages({ capabilities, charactersRoot, clock = Date.now, assetAvailable = () => false, fault = () => {} }) {
+export function createRolePackages({ capabilities, charactersRoot, purposeStateDir = capabilities.stateFile ? path.join(path.dirname(capabilities.stateFile), 'companion') : null, clock = Date.now, assetAvailable = () => false, fault = () => {} }) {
   const root = path.resolve(charactersRoot), area = packageArea(root);
   const initialize = () => { mkdir(root); mkdir(area); };
   let token, generation, serial = Promise.resolve();
@@ -73,6 +73,21 @@ export function createRolePackages({ capabilities, charactersRoot, clock = Date.
     }
     return value;
   }
+  function purposeState(character) {
+    if (!purposeStateDir) return { terminals: {}, bodyHashes: [] };
+    const name = sha256(character).slice(0, 24) + '.state.json', where = path.join(purposeStateDir, name);
+    if (!fs.existsSync(where)) return { terminals: {}, bodyHashes: [] };
+    parents(path.dirname(where)); safe(where, false, 4 * 1024 * 1024);
+    const state = JSON.parse(fs.readFileSync(where, 'utf8'));
+    if (state.purpose?.version !== 'governed-purpose-v1') return { terminals: {}, bodyHashes: [] };
+    const replay = mergePurposeReplay({ terminals: state.purpose.terminals || {}, bodyHashes: state.bodyHashes || [] },
+      { terminals: state.purpose.transferTerminals || {}, bodyHashes: [] });
+    const receipts = {};
+    // A transferred package never resumes a source machine's pending work.
+    for (const row of state.purpose.receipts || []) if (row.terminalKey && ['sent', 'unknown'].includes(row.outcome))
+      receipts[row.terminalKey] = row.outcome === 'unknown' ? 'unknown' : 'consumed';
+    return mergePurposeReplay(replay, { terminals: receipts, bodyHashes: [] });
+  }
   function filesystem(character) {
     const paths = rolePaths(character), value = persona(paths.directory);
     const manifest = readJson(paths.manifest, null), current = capabilities.currentCharacter();
@@ -81,9 +96,9 @@ export function createRolePackages({ capabilities, charactersRoot, clock = Date.
     const entries = index.characters.filter(item => item.id === character);
     if (entries.length > 1) throw error('CHARACTER_ID_CONFLICT', '角色索引包含重复身份。');
     return { exists: !!manifest, indexExists: entries.length > 0, indexDigest: sha256(canonical(entries)), roleEpoch: current?.id === character ? String(current.epoch) : String(manifest?.updatedAt || ''),
-      personaDigest: sha256(canonical(value)), manifestDigest: sha256(canonical(manifest)), persona: value };
+      purposeDigest: sha256(canonical(purposeState(character))), personaDigest: sha256(canonical(value)), manifestDigest: sha256(canonical(manifest)), persona: value };
   }
-  function fsFence(value) { return { exists: value.exists, indexExists: value.indexExists, indexDigest: value.indexDigest, roleEpoch: value.roleEpoch, personaDigest: value.personaDigest, manifestDigest: value.manifestDigest }; }
+  function fsFence(value) { return { purposeDigest: value.purposeDigest, exists: value.exists, indexExists: value.indexExists, indexDigest: value.indexDigest, roleEpoch: value.roleEpoch, personaDigest: value.personaDigest, manifestDigest: value.manifestDigest }; }
   function source() { const current = capabilities.currentCharacter(); if (!current?.id) throw error('NOT_FOUND', '没有当前角色。'); return id(current.id); }
   async function sourceFence(character) {
     const before = filesystem(character), db = await internal('fence', { character_id: character }), after = filesystem(character);
@@ -109,6 +124,7 @@ export function createRolePackages({ capabilities, charactersRoot, clock = Date.
     const summaryFile = path.join(capabilities.supervisor.dataDir, 'portable-inputs', `${opaque(captured.attention_id)}.json`);
     parents(path.dirname(summaryFile)); safe(summaryFile, false, 16 * 1024 * 1024);
     const summary = JSON.parse(fs.readFileSync(summaryFile, 'utf8'));
+    summary.purpose = mergePurposeReplay(summary.purpose || { terminals: {}, bodyHashes: [] }, purposeState(character));
     const payload = { schema: 1, packageId: crypto.randomBytes(16).toString('hex'), sourceCharacterId: character,
       sourceRevision: { roleEpoch: before.roleEpoch, personaDigest: before.personaDigest, memoryEpoch: captured.memory_epoch, attentionRevision: captured.attention_revision },
       persona: layers, snapshot: { characterId: character, manifest, bytes: data.length, sha256: sha256(data), data: data.toString('base64') }, platformState: summary, assets, exclusions: EXCLUSIONS };

@@ -190,6 +190,15 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   let lastChatAt = 0;
   let lastProactiveAt = 0;
   let lastError = '';
+  let outputMemory = null;
+  const outputClosures = new Set();
+  let purposeObserver = null;
+  const purposeActivity = { epoch: crypto.randomUUID(), revision: 0, sequence: 0, receivedAt: 0, lastSentAt: 0, processing: 0 };
+  function noteSent() {
+    purposeActivity.sequence++; purposeActivity.lastSentAt = Date.now();
+    return { epoch: purposeActivity.epoch, sequence: purposeActivity.sequence, at: purposeActivity.lastSentAt };
+  }
+  function activity() { return { ...purposeActivity, foreground: purposeActivity.processing > 0 || inFlight > 0 || outputClosures.size > 0 }; }
 
   function roleCapture() {
     try { return captureTargetGate(local.currentCharacter?.() || readCurrentCharacter()); }
@@ -205,10 +214,17 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
   async function validateDelivery(result) { const captured = roleCapture(); for (const guard of transport.get(result)?.guards || []) await guard(); roleCheck(captured); }
   function validateDeliverySync(result) { roleCapture(); for (const guard of transport.get(result)?.sync || []) guard(); }
-  function finishDelivery(result, outcome) { const record = transport.get(result); if (!record) return; transport.delete(result); for (const receipt of record.receipts) receipt(outcome); }
+  function finishDelivery(result, outcome) {
+    const record = transport.get(result); if (!record) return; transport.delete(result);
+    const pending = record.receipts.map(receipt => receipt(outcome, outcome === 'sent' ? noteSent() : null));
+    if (!record.receipts.length && result.reply && outcome === 'sent') noteSent();
+    return Promise.all(pending);
+  }
   function invalidateTransient() {
+    const closing = [...outputClosures].map(close => close('unknown'));
     for (const event of events) { event.toolReceipt?.('unknown'); if (event.toolGuard) event.text = ''; }
     events.length = 0; audioGuards.clear();
+    return Promise.all(closing);
   }
 
   function ensureDirs() {
@@ -507,12 +523,29 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   function deliverEphemeral(envelope) {
     return new Promise(resolve => {
       let finished = false;
-      const receipt = outcome => { if (finished) return; finished = true; envelope.signal.removeEventListener('abort', aborted); resolve({ outcome }); };
-      const event = { type: 'reply', text: envelope.text, modality: 'text', messageId: `media:${crypto.randomUUID()}`, toolGuard: envelope.guard, toolSync: envelope.syncGuard, toolReceipt: receipt, memory_write: false, suppressHistory: true, suppressTts: true };
+      const receipt = (outcome, activity) => { if (finished) return; finished = true; envelope.signal.removeEventListener('abort', aborted); resolve({ outcome, deliveryId: event.messageId, activity }); };
+      const event = { type: 'reply', text: envelope.text, modality: envelope.audioKey ? 'voice' : 'text', audioKey: envelope.audioKey,
+        messageId: `${envelope.purpose ? 'purpose' : 'media'}:${crypto.randomUUID()}`, toolGuard: envelope.guard, toolSync: envelope.syncGuard, toolReceipt: receipt, memory_write: false, suppressHistory: true, suppressTts: true };
       const aborted = () => { event.text = ''; receipt('unknown'); };
       if (envelope.signal.aborted) { aborted(); return; }
       envelope.signal.addEventListener('abort', aborted, { once: true }); emit(event);
     });
+  }
+
+  async function deliverPurpose(envelope) {
+    envelope.syncGuard();
+    let audioKey;
+    if (envelope.modality === 'voice') {
+      if (!voiceSettings().enabled || local.mediaHost?.suppressLegacyAudio())
+        throw new CapabilityError('PURPOSE_VOICE_UNAVAILABLE', '当前没有可用的已授权单一语音输出。', '选择文字载体；需要语音时在既有语音/设备页核对当前输出许可。');
+      const audio = await synthesize(envelope.text);
+      envelope.syncGuard(); await envelope.guard(); envelope.syncGuard();
+      if (!audio.ok) throw new CapabilityError(audio.code || 'PURPOSE_VOICE_UNAVAILABLE', audio.error || '当前语音输出不可用。', audio.hint || '核对既有语音设置或改用文字。');
+      audioKey = audio.key;
+      audioGuards.set(audioKey, { guard: envelope.guard, syncGuard: envelope.syncGuard });
+    }
+    await envelope.guard(); envelope.syncGuard();
+    return deliverEphemeral({ ...envelope, purpose: true, audioKey });
   }
 
   function notePresence(clientId = 'pet') {
@@ -616,7 +649,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         roleCheck(packageGate);
         const guards = [() => roleCheck(packageGate), ...fresh.map(event => event.toolGuard || (event.localContext ? () => local.validate(event.localContext) : event.hostCapture ? () => local.toolHost.checkCapture(event.hostCapture) : null)).filter(Boolean)];
         const sync = [() => roleCheck(packageGate), ...fresh.map(event => event.toolSync || (event.localContext?.binding.host_gate ? () => local.toolHost.validateCapture(event.localContext.binding.host_gate) : event.hostCapture ? () => local.toolHost.validateCapture(event.hostCapture) : null)).filter(Boolean)];
-        if (guards.length) transport.set(payload, { guards, sync, receipts: toolEvents.map(event => outcome => { event.toolReceipt?.(outcome); event.text = ''; }) });
+        if (guards.length) transport.set(payload, { guards, sync, receipts: toolEvents.map(event => (outcome, activity) => { event.toolReceipt?.(outcome, activity); event.text = ''; }) });
         return payload;
       }
       if (Date.now() >= deadline) {
@@ -862,7 +895,17 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   // ── 对外：聊天 ──────────────────────────────────────────────────────────
-  async function chat({ text = '', modality = 'text' } = {}) {
+  async function chat(input = {}) {
+    const text = String(input.text ?? '').trim();
+    if (!text || !settings().chat.enabled) return chatInner(input);
+    for (const close of outputClosures) void close('unknown');
+    const eventId = `pet:${crypto.randomUUID()}`;
+    purposeActivity.revision++; purposeActivity.sequence++; purposeActivity.receivedAt = Date.now(); purposeActivity.processing++;
+    purposeObserver?.({ channel: petChannel, eventId, conversationEpoch: purposeActivity.epoch, sequence: purposeActivity.sequence });
+    try { return await chatInner({ ...input, eventId }); }
+    finally { purposeActivity.processing--; }
+  }
+  async function chatInner({ text = '', modality = 'text', eventId } = {}) {
     let packageGate; try { packageGate = roleCapture(); } catch (error) { return errorResult(error); }
     const s = settings();
     if (!s.chat.enabled) return { ok: false, error: '桌宠对话已关闭（设置 → 桌宠 → 对话）' };
@@ -873,14 +916,14 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     if (!say) return { ok: false, error: '说点什么吧' };
     const mode = modality === 'voice' ? 'voice' : 'text';
     let toolInput;
-    try { if (local.toolHost && local.guarded) { await local.binding(petChannel); toolInput = local.toolHost.input(petChannel, { eventId: `pet:${crypto.randomUUID()}`, text: say }); } }
+    try { if (local.toolHost && local.guarded) { await local.binding(petChannel); toolInput = local.toolHost.input(petChannel, { eventId, text: say }); } }
     catch (error) { return errorResult(error); }
     if (toolRequested) {
       let lease;
       try {
         lease = await local.beginTurn(petChannel);
         const original = await local.context(petChannel);
-        await local.ingest(original, `pet:tool-question:${crypto.randomUUID()}`, say, { actor: 'user' });
+        await local.ingest(original, eventId, say, { actor: 'user', original: true });
         const answer = await local.toolHost.handle(toolInput, { deliver: envelope => new Promise(resolve => {
           let finished = false;
           const receipt = outcome => { if (finished) return; finished = true; envelope.signal.removeEventListener('abort', aborted); resolve({ outcome }); };
@@ -910,13 +953,28 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     }
 
     inFlight += 1;
-    const startedAt = Date.now();
-    let localContext; let writerLease;
-    try { if (local.guarded) { if (toolInput) local.toolHost.validateInput(toolInput); writerLease = await local.beginTurn(petChannel); localContext = await local.context(petChannel, say); if (toolInput) local.toolHost.validateInput(toolInput); await local.call(petChannel, 'attention.respond'); } }
+    const startedAt = Date.now(), inputRevision = purposeActivity.revision;
+    let outputInput;
+    let localContext; let writerLease; let localRemembered = false;
+    try { if (local.guarded) {
+      if (toolInput) local.toolHost.validateInput(toolInput);
+      writerLease = await local.beginTurn(petChannel); localContext = await local.context(petChannel, say);
+      if (toolInput) local.toolHost.validateInput(toolInput);
+      await local.call(petChannel, 'attention.respond');
+      const saved = await local.ingest(localContext, eventId, say, { actor: 'user', original: true });
+      outputInput = saved.id ? { id: saved.id, revision: 1 } : null;
+      localContext = { ...localContext, memory_epoch: saved.memory_epoch };
+      await local.validate(localContext); localRemembered = !saved.skipped;
+    } }
     catch (e) { local.endTurn(writerLease); inFlight -= 1; const failure = errorResult(e); lastError = failure.error; return failure; }
     const history = readHistory();
     const role = roleInfo();
     const owner = ownerInfo();
+    const checkPersona = () => {
+      if (localContext && inputRevision !== purposeActivity.revision) throw new CapabilityError('REQUEST_CANCELLED', '原桌宠回合已被新输入取消。');
+      if (localContext && role.persona.slice(0, 4200) !== roleInfo().persona.slice(0, 4200))
+        throw new CapabilityError('STALE_PERSONA', '本轮桌宠人格层已变化。', '按当前角色重新发起消息。');
+    };
     const system = buildChatSystemPrompt({ role, owner, memory: localContext ? localContext.text : memoryBlock(), purpose: purposeBackground(), modality: mode });
     const user = [
       history.messages.length ? '【最近聊天】' : '',
@@ -942,7 +1000,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         lastError = failure.error;
         return failure;
       }
-      roleCheck(packageGate);
+      roleCheck(packageGate); checkPersona();
       recordUsage(result.usage, result.model);
       let reply = cleanReply(result.text);
       if (!reply) return { ok: false, error: '她这次没说话（模型返回空）' };
@@ -961,14 +1019,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         }
       }
       if (local.guarded && !localContext) throw Object.assign(new Error('后端已切换，本次旧回复已取消。'), { code: 'STALE_CONTEXT' });
-      let localRemembered = false;
       if (localContext) {
         await local.validate(localContext);
-        const saved = await local.ingest(localContext, `pet:${crypto.randomUUID()}`, say, { actor: 'user' });
-        // Use only this transaction's epoch; never refresh over a concurrent correction.
-        await local.validate({ ...localContext, memory_epoch: saved.memory_epoch });
-        localContext = { ...localContext, memory_epoch: saved.memory_epoch };
-        localRemembered = !saved.skipped;
       }
       roleCheck(packageGate);
       appendMessage(history, userMessage);
@@ -993,7 +1045,48 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         remembered,
         voice: aiMessage.audioKey ? { ok: true, key: aiMessage.audioKey } : (mode === 'voice' ? { ok: false, error: lastError || '语音合成失败，已用文字回复' } : null),
       };
-      return bindDelivery(payload, async () => { roleCheck(packageGate); if (localContext) await local.validate(localContext); }, null, () => { roleCheck(packageGate); if (localContext) local.toolHost?.validateCapture(localContext.binding.host_gate); });
+      const sync = () => { roleCheck(packageGate); checkPersona(); if (localContext) local.toolHost?.validateCapture(localContext.binding.host_gate); };
+      let receipt = null;
+      if (localContext) {
+        const lease = writerLease; writerLease = null;
+        let commit, memory, cleaned = false, cancelled = false, timer;
+        const publishMemory = result => { memory = result; outputMemory = result; };
+        const publishCleanup = cleanup => {
+          const current = outputMemory === memory;
+          memory = { ...memory, cleanup };
+          if (current) {
+            outputMemory = memory;
+            const failure = cleanup.ok ? memory.ok ? null : memory : cleanup;
+            lastError = failure ? `${failure.code} ${failure.error} ${failure.hint}` : '';
+          }
+        };
+        const guard = () => { sync(); if (cancelled) throw new CapabilityError('REQUEST_CANCELLED', '原输出收尾已取消。'); };
+        receipt = outcome => {
+          if (outcome !== 'sent') cancelled = true;
+          clearTimeout(timer);
+          commit ||= (async () => {
+            try {
+              guard();
+              if (outcome === 'sent' && outputInput) {
+                const sources = [...new Map([...(localContext.records || []), outputInput].map(source => [source.id, { id: source.id, revision: source.revision }])).values()];
+                publishMemory({ ok: true, ...(await local.ingestConfirmedOutput(localContext, `pet-output:${eventId}`, reply, { sources, guard })) });
+              } else publishMemory({ ok: true, skipped: true });
+            } catch (error) {
+              publishMemory(errorResult(error)); lastError = `${memory.code} ${memory.error} ${memory.hint}`;
+            }
+          })();
+          return commit.then(() => {
+            if (!cleaned) {
+              try { local.endTurn(lease); cleaned = true; outputClosures.delete(receipt); publishCleanup({ ok: true }); }
+              catch (error) { publishCleanup(errorResult(error)); }
+            }
+            return memory;
+          });
+        };
+        outputClosures.add(receipt);
+        timer = setTimeout(() => { void receipt('unknown'); }, 45000); timer.unref?.();
+      }
+      return bindDelivery(payload, async () => { sync(); if (localContext) await local.validate(localContext); sync(); }, receipt, sync);
     } catch (error) {
       const failure = error instanceof CapabilityError || localContext || local.guarded ? errorResult(error) : { ok: false, error: String(error?.message ?? error).slice(0, 200) };
       lastError = failure.error;
@@ -1093,7 +1186,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         lastUserAt: history.lastUserAt,
         lastAssistantAt: history.lastAssistantAt,
         busy: inFlight > 0,
-        lastChatAt,
+        lastChatAt, outputMemory,
       },
       proactive: {
         ...s.proactive,
@@ -1133,6 +1226,13 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     readAudio,
     emit,
     deliverEphemeral,
+    deliverPurpose,
+    activity,
+    setPurposeObserver: observer => { purposeObserver = observer; },
+    personaSnapshot: () => {
+      const text = roleInfo().persona.slice(0, 4200);
+      return { ...local.currentCharacter(), text, hash: tokenHash(text) };
+    },
     acknowledgeMediaAudio: nonce => local.mediaHost?.ackLegacyAudio(nonce),
     validateDelivery,
     validateDeliverySync,

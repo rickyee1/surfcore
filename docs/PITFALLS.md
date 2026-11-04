@@ -1,5 +1,9 @@
 # 踩坑档案（PITFALLS）
 
+## 2026-11-04 文字目的与迁移消费标记
+
+普通助手输出在真实文字回执后写入来源闭包。已送待续的迁移消费标记需要独立于会过期的receipt保存，避免正常状态重建丢掉标记后在新机器重复联系。用户已终止后续测试及音频工作，当前采用已完成文字代码收尾，完整记录见[目的交付case](cases/2026-11-04-governed-purpose-coordinator.md)。
+
 ## 2026-11-04 工具 unknown 的呈现与测试隔离
 
 Explorer可能已经打开目标窗口，而启动进程的回执仍无法确认。保留unknown并提示核对窗口，host须透传该终态及broker的error/hint。异步handle会提前启动step，测试的RPC拦截必须在handle之前安装，Python夹具还需在服务启动前硬拒绝GUI子进程。实测、早期夹具副作用不确定性和验证见[工具结果记录](cases/2026-11-04-tool-outcome-unknown.md)。
