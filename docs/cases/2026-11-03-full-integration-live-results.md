@@ -1,5 +1,17 @@
 # 完整融合实测：已运行链路与未通过项
 
+## 2026-11-04 后续验证
+
+已接受P2素材attempt2并提交8e7232c。材料、人格及原作用域快照的22项检查和三个独立修复反例通过。常驻知识准入使用保守正向文法，部分稳定旧文本会被排除，已派发的旧角色写入无法撤回，迟到结果会被拒绝且新角色状态保持正确。完整purpose接线另行实施。
+
+A01控制attempt2功能独立通过并提交0fa1f35。新off seed独立保存，保留旧max seed及完整旧120结果。原版两条真实原生模型烟测均完成，隔离QQ首条2204ms、Pet819ms，每次实际dispatch都通过verifyCallEvidence。native目录返回DeepSeek-V4.1-Flash、context1048576，远端实际版本未暴露。此烟测的118条NOT_RUN属于刻意未执行的完整plan占位，完整比较尚待新候选冻结。证据在`.local/evaluations/a01/controlled-original-smoke-20261104`。
+
+本次停机备份`.local/backups/accepted-upgrade-20261104-171421`有3817文件、95669162字节，逐文件hash与源一致。使用该快照中真实DPAPI/SQLCipher数据库的独立副本执行backup.create→stage→commit→重新绑定→关闭/重开。24条原记录的全行摘要恢复前后同为0e28792c4ba734f7184340313d50df2a523507bd281e28eab9296728d965697a。保留标记恢复、删除标记继续删除。live memory.db、sovereignty.db和key.dpapi三文件hash保持相同。测试仅在副本改动合成标记，零模型/平台/设备调用。
+
+首次恢复夹具把两个标记设成相同source_ref，删除闭包正确将二者一起删除，导致“保留标记”断言失败。真实查询确认同source fingerprint对应两个deleted记录。该次完整日志与failure-analysis.json保留，第二个全新副本采用独立来源后通过。复现脚本和结果分别为`.local/evidence/full-integration/verify-recovery-clone-20261104-v2.py`与`recovery-clone-20261104-v2/result.json`。该证据覆盖数据库副本恢复，角色包实际UI导入和第二台物理设备仍待验证。
+
+用户已恢复SnowLuma登录。当前主DSH/记忆/QQ桥接服务停止，最后运行验收为9f，新代码后续集中部署。当前渠道semantic-host7仍在修复清理结果的消费者，原版完整目的单元仍在实施，设备测试按用户要求暂停。
+
 事实截点：2026-11-03，Asia/Shanghai。运行版本 `9f456d24b3165773b805879a5d59912a1e6af1e2`，原生桌宠三文件补丁已整体应用；原 DSH ASAR 未改。**整体 FAIL / 尚未完成；没有启用自主外发。** 此记录汇编已有实测，不启动新模型、设备或平台发送。
 
 ## 链路与机制

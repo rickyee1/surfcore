@@ -1,6 +1,24 @@
 # SurfCore × 路遥融合验收矩阵
 
-事实截点：2026-11-03，Asia/Shanghai。**整体尚未验收通过；真实部署为 `9f456d24b3165773b805879a5d59912a1e6af1e2`。** 本文只汇编已存在的证据，不启动测试、服务、模型、平台或设备，也不增加实现需求。未接受的semantic/T1/P1工作区修改不属于运行版本。
+## 11月4日验证更新
+
+当前主源码包含已接受的P2材料8e7232c与A01控制0fa1f35。DSH、记忆服务和QQ桥接处于停止状态，用户已恢复SnowLuma登录。当前集成状态以本节及HANDOFF顶部为准。
+
+| 项目 | 本次证据 | 后续工作 |
+| --- | --- | --- |
+| P2材料 | attempt2功能独立通过，22项真实SQLCipher检查，主仓四文件canonical一致 | 独立planner与完整协调器/可信事件/UI接线 |
+| A01控制 | attempt2功能独立通过，透明iterator及拒绝attempt记录修复，主仓13文件一致 | 新候选冻结后的120次对照与盲评 |
+| 原版新参数烟测 | 两条真实模型分别完成隔离QQ和Pet流程，2204ms/819ms，实际call证据通过，模型目录显示DeepSeek-V4.1-Flash | 候选实测与完整比较，旧120次FAIL保留 |
+| 渠道清理 | attempt6已修复所有权保留、重试与控制台重启，独立仍发现部分消费者漏报cleanup | semantic-host7集中修全部直接/后台消费者并复核 |
+| 备份与恢复 | 停机快照3817文件/95669162字节源hash一致，真实DPAPI数据库副本恢复后24条原记录digest相同，删除标记仍删除，重开通过 | 角色包完整UI流程与第二台物理电脑迁移 |
+| 完整purpose | 独立planner/model/attention.status有15+4项检查，进入独立复核 | QQ/Pet单载体、配置/UI、真实主动联系 |
+| 设备 | 用户暂停实际设备测试 | 等用户恢复设备实测 |
+
+新恢复证据位于 `.local/evidence/full-integration/recovery-clone-20261104-v2/result.json`。首个夹具共用source_ref使两个合成标记按删除闭包共同删除，诊断和失败日志已保留，第二个全新副本改用独立来源后通过。live数据库、独立删除库、DPAPI文件hash均未变化。A01烟测证据位于 `a01-controlled-original-smoke-20261104.json`，startup目录预检准备项按原契约保留，实际dispatch检查均通过。
+
+事实截点：2026-11-03，Asia/Shanghai。**整体尚未验收通过；真实部署为 `9f456d24b3165773b805879a5d59912a1e6af1e2`。** 本文只汇编已存在的证据，不启动测试、服务、模型、平台或设备，也不增加实现需求。未接受的semantic/T1工作区修改及已接受但未部署的P1元数据均不属于当前运行版本。
+
+后续授权更新：用户已取消本任务自动修补次数上限，原“等待次数授权”已解除；旧FAIL/attempt及验收标准不变。正在隔离修复semantic-host4/T1 activity5，并诊断A01。夜间最多一条仍未使用，设备仍暂停。
 
 要求来源：[原方案第 11–12 节](../../luyao_companion_v0_1/docs/SURFCORE_LUYAO_INTEGRATION_PLAN.md)、[本仓工作副本](../.ai-work/luyao-integration/source-plan.md)、[完整执行单](FULL_INTEGRATION_EXECUTION.md)；当前任务状态参考 [本机状态记录](../.local/evidence/full-integration/state.json)。执行单/状态记录用于定位，具体通过结论以对应版本的独立评审、冻结清单和实际结果为准。历史 case 中的“待独立复核”不推翻其后已记录的限定 PASS；旧部署的实测也不能升级为新版本通过。
 
@@ -18,7 +36,7 @@
 | 项目 | 当前结论 | 仍未完成 |
 | --- | --- | --- |
 | 部署/升级 M0/M5、A10–A11 | 9f实际部署；用户DPAPI/SQLCipher升级、摘要保持和重启通过；9f audit108/108、regressions16、manifest725 | 未接受源码不能重启加载；后续版本需最终冻结与验证 |
-| A01 | **FAIL**：全120次、115完成/5超时、双盲360评分；融合版A01-25-r2与A01-28-r1漏答硬失败；40参数一致性失败 | 参数差异未归因，不能把原始15/30当有效受控版本比较；原失败全保留 |
+| A01 | **FAIL**：全120次、115完成/5超时、双盲360评分；融合版A01-25-r2与A01-28-r1漏答硬失败；40参数一致性失败 | 原生帧已证实72次标题与3次Writer调用来源，另1次仍NOT_PROVEN；不改变旧40项阻塞及15/30无效受控结论 |
 | M1 / A02–A04 | 真实Writer消费1条、认知提案0；CPU索引12/12重建、查询通过。P1元数据attempt2功能独立通过，112相关检查；A01原生隔离受众测试已纳入完整批次 | 真实提案质量、纠正/删除/恢复后输出尚未完整覆盖；P1尚未接JS/部署 |
 | M2 / A05–A07 | QQ/Pet真实共享合成记忆召回成功（预热后3秒）。原quiet/预算隔离证据仍有效 | semantic-host3紧停与时限反例、T1追加4桥接重启反例FAIL；完整purpose与单载体接线缺失，主动发送关闭 |
 | M3 / A08–A09 | 实际时间工具与合成文件经确认→固定模型→原生桌宠sent；过期确认拒绝；便签创建/读取local_only | Explorer、实锁屏未验；一种自然说法未命中分类器限制保留 |
@@ -28,7 +46,7 @@
 
 本机证据入口：[A01结果](../.local/evidence/full-integration/a01-final-results.json)、[盲评理由摘录](../.local/evidence/full-integration/a01-rationale-excerpts.md)、[两小时结果](../.local/evidence/full-integration/observer-two-hour-result.json)、[当前状态](../.local/evidence/full-integration/state.json)。具体工具、平台、角色包证据见实测case。
 
-当前阻塞：semantic-host3与T1追加4的自动修补次数均已耗尽，上限豁免等待用户明确回答；没有自动重复失败尝试。P1是完整purpose所需的新素材元数据，attempt2功能独立PASS，不重置旧计数，P2单协调器完整接线尚未实现。一次夜间公开内容私聊测试仍未使用；每天4次/90分钟/quiet保留，取消30分钟闲置门槛的修改未部署。P1保存的补丁与采用模块一致性已核，但原生逐编辑调用轨迹仍NOT_VERIFIED；不冒充已验证的宿主归属。
+当前：用户已取消修补次数上限；semantic-host4/T1 activity5已冻结进入独立复核，取消后Writer占用残留反例仍待修。P1是完整purpose所需的新素材元数据，attempt2功能独立PASS，不重置旧计数，P2素材适配正在独立树实施，单协调器完整接线尚未实现。一次夜间公开内容私聊测试仍未使用；每天4次/90分钟/quiet保留，取消30分钟闲置门槛的修改未部署。P1保存的补丁与采用模块一致性已核，但原生逐编辑调用轨迹仍NOT_VERIFIED；不冒充已验证的宿主归属。
 
 ## 11月2日历史检查点：M0–M5 退出条件
 
