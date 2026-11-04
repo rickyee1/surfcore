@@ -5,6 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { once } from 'node:events';
 import { IDS, inside, json, save, sha, loopback, fault } from './a01-contract.mjs';
+import { createModelPolicy } from './a01-model-policy.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -18,10 +19,14 @@ export function isolatedEnvironment(trialDir, repo, extra = {}) {
   for (const key of ['USERPROFILE','HOME','APPDATA','LOCALAPPDATA','TEMP','DSH_HOME']) { inside(trialDir, env[key]); fs.mkdirSync(env[key], { recursive: true }); }
   return env;
 }
-export function stageHost({ trialDir, repo, scene, trialId, version, seedDir, controlToken, dshPort, consolePort, onebot, personaFile, python }) {
+export function stageHost({ trialDir, repo, scene, trialId, version, seedDir, controlToken, dshPort, consolePort, onebot, personaFile, python, sceneTimeoutMs = 180000 }) {
   inside(trialDir, repo);
+  if (!Number.isSafeInteger(sceneTimeoutMs) || sceneTimeoutMs <= 0) throw fault('SCENE_WATCHDOG_INVALID', 'Supply the finite outer runner wait budget separately from model deadlines.');
+  const sceneWatchdog = { timeoutMs: sceneTimeoutMs, implementation: 'a01-native-runner invoke/quietUntil', scope: 'outer-per-input-wait', modelTotalDeadline: false };
   const seedPath = path.resolve(seedDir), selection = json(path.join(seedPath, 'selection.json'));
   if (Object.keys(selection).some(k => !['provider','model','reasoningEffort'].includes(k)) || !selection.provider || !selection.model) throw fault('MODEL_SEED_INVALID', 'Supply only the explicitly selected model fields.');
+  const policy = createModelPolicy(selection, scene.setup.channel);
+  if (selection.reasoningEffort !== 'off') throw fault('MODEL_SEED_INVALID', 'Freeze selection.reasoningEffort=off before staging; do not rewrite an old seed.');
   const env = isolatedEnvironment(trialDir, repo, { A01_CONTROL_TOKEN: controlToken, A01_TRIAL_CONFIG: path.join(trialDir, 'trial-host.json'), ...(python ? { SURFCORE_LOCAL_PYTHON: python } : {}) });
   const credentialSource = path.join(seedPath, '.credentials.yaml');
   if (!fs.lstatSync(credentialSource).isFile() || fs.lstatSync(credentialSource).isSymbolicLink()) throw fault('MODEL_SEED_INVALID');
@@ -34,7 +39,7 @@ export function stageHost({ trialDir, repo, scene, trialId, version, seedDir, co
   const mcp = [['mcp-snowluma','snowluma','mcp-snowluma-safe.js'],['mcp-snowluma-host','snowluma-host','mcp-host-server.js'],['mcp-web-search-safe','web-search-safe','mcp-web-search-safe.js']].map(([id, serverName, script]) => ({ id, name: '@deepseek-ai/dsh-mcp-client', config: { serverName, transport: 'stdio', command: process.execPath, args: [path.join(repo, 'src', script)], toolCallTimeoutMs: 725000 } }));
   // Configure before Loader activation. Awaiting configEditor from a plugin's
   // apply() waits on the same Loader transaction and prevents routes becoming ready.
-  save(path.join(profile, 'cordis.patch.yml'), [{ insert: [...mcp, { id: 'a01-native-host', name: pathToFileURL(path.join(here, 'a01-native-host.mjs')).href, config: {} }] }, { id: 'agent-default-model', config: selection }]); // JSON is valid YAML.
+  save(path.join(profile, 'cordis.patch.yml'), [{ insert: [...mcp, { id: 'a01-native-host', name: pathToFileURL(path.join(here, 'a01-native-host.mjs')).href, config: {} }] }, { id: 'agent-default-model', config: selection }, { id: 'session-title-llm', disabled: true }, { id: 'llm-deepseek', config: { streamIdleTimeoutMs: 60000, reasoningEffort: 'off' } }]); // JSON is valid YAML. Native defaults retain endpoint/credential references.
   const config = { dsh: { baseUrl: `http://127.0.0.1:${dshPort}`, ...selection }, snowluma: { wsUrl: onebot.wsUrl, httpUrl: onebot.baseUrl, followDiscoveredEndpoint: false, autoDiscover: false },
     ownerQQ: IDS.owner, admin: { qq: IDS.owner, name: '小禾' }, allow: { private: [IDS.owner, IDS.other], groups: [IDS.group_a, IDS.group_b] }, allowAllWhenEmpty: false,
     consolePort, consoleToken: controlToken, sessionCwd: path.join(trialDir, 'session-work'), persona: { file: path.join(repo, 'roles/a01-persona.md') },
@@ -43,9 +48,10 @@ export function stageHost({ trialDir, repo, scene, trialId, version, seedDir, co
   save(path.join(repo, 'config.json'), config);
   fs.mkdirSync(path.join(repo, 'state'), { recursive: true }); save(path.join(repo, 'state/mode.json'), { mode: ['qc','p'].includes(scene.setup.channel) ? 'chat' : 'reserved2' });
   fs.mkdirSync(path.join(repo, 'roles'), { recursive: true }); fs.copyFileSync(personaFile, path.join(repo, 'roles/a01-persona.md'), fs.constants.COPYFILE_EXCL);
-  save(path.join(env.DSH_HOME, 'surfcore/config.json'), { version: 1, qqbotRoot: repo, bridge: { autoStart: false }, updates: { enabled: false, checkOnStart: false }, platforms: { start: { qq: true, bili: false } }, pet: { chat: { enabled: true, remember: true } }, memoryCard: { enabled: true }, purpose: { enabled: false } });
-  save(env.A01_TRIAL_CONFIG, { trialDir, repo, scene, trialId, version, selection, personaFile });
-  return { env, selection, baseUrl: `http://127.0.0.1:${dshPort}`, config };
+  save(path.join(env.DSH_HOME, 'surfcore/config.json'), { version: 1, qqbotRoot: repo, bridge: { autoStart: false }, updates: { enabled: false, checkOnStart: false }, platforms: { start: { qq: true, bili: false } }, pet: { chat: { enabled: true, remember: true, temperature: 0.2, reasoningEffort: 'off' } }, memoryCard: { enabled: true }, purpose: { enabled: false } });
+  save(env.A01_TRIAL_CONFIG, { trialDir, repo, scene, trialId, version, selection, personaFile, modelPolicy: policy, sceneWatchdog });
+  save(path.join(trialDir, 'model-policy.json'), policy);
+  return { env, selection, modelPolicy: policy, sceneWatchdog, baseUrl: `http://127.0.0.1:${dshPort}`, config };
 }
 export async function stopOwned(child, label) {
   if (!child || !child.pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -89,7 +95,7 @@ export async function startNativeHost(args) {
     const asarEnd = cliEntry.toLowerCase().indexOf('.asar');
     const runtimeSource = asarEnd >= 0 ? cliEntry.slice(0, asarEnd + 5) : cliEntry;
     const stat = fs.statSync(runtimeSource);
-    const attestation = { executableSha256: sha(fs.readFileSync(executable)), cliEntry, runtimeSource: { path: runtimeSource, size: stat.size, mtimeMs: stat.mtimeMs }, runtimeNode: ready.node, runnerNode: process.version, selection: staged.selection, isolation: true, observer: true };
+    const attestation = { executableSha256: sha(fs.readFileSync(executable)), cliEntry, runtimeSource: { path: runtimeSource, size: stat.size, mtimeMs: stat.mtimeMs }, runtimeNode: ready.node, runnerNode: process.version, selection: staged.selection, isolation: true, observer: true, sceneWatchdog: staged.sceneWatchdog };
     save(path.join(trialDir, 'host-attestation.json'), attestation);
     return { ...staged, consolePort, request, attestation, child, bridgeEnv: { ...staged.env, DSH_WEB_URL: staged.baseUrl }, async stop() { await stopOwned(child, 'DSH'); } };
   } catch (e) { await stopOwned(child, 'DSH startup'); throw e; }

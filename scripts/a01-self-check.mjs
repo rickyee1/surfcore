@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
 import { BASELINE, IDS, fixture, schedule, blindPack, assess, parity, modelControls, inside, save } from './a01-contract.mjs';
 import { observeLlm } from './a01-native-host.mjs';
+import { createModelPolicy, requestControls } from './a01-model-policy.mjs';
 import { createRecorder } from './a01-onebot-recorder.mjs';
 import { isolatedEnvironment, stageHost, startNativeHost, delay, ownedHostReady, ownedBridgeReady } from './a01-dsh-factory.mjs';
 import { makePlan, validatePlan, latencies, archiveTrial, shouldStartBridge } from './a01-native-runner.mjs';
@@ -76,7 +77,10 @@ await check('blind pack keeps all60 pairs/120 runs including NOT_RUN, failed, ti
 });
 function completeEvidence() {
   const plan = makePlan({ originalRepo: path.join(root, '.local/evaluations/a01/original-59ec3066'), forkRepo: root, forkRef: '875b405c20dd58f2107972b1d876f11924a1d562', seed: 'assessment-test' });
-  const results = plan.trials.map(t => ({ ...t, state: 'completed', inputs: [], bubbles: [], undeliveredOutputs: [], calls: [{ phase: 'scored', dispatched: true, startedAt: 1, endedAt: 2, finish: { kind: 'stop' }, effective: { provider: 'synthetic', model: 'synthetic', contextWindow: 64000 } }], toolEvents: [{ type: 'tool/call', nativeCallId: 'native-1', phase: 'scored' }, { type: 'tool/result', nativeCallId: 'native-1' }] }));
+  const results = plan.trials.map(t => {
+    const p = createModelPolicy({ provider: 'synthetic', model: 'synthetic' }, t.channel), controls = requestControls(p);
+    return { ...t, state: 'completed', inputs: [], bubbles: [], undeliveredOutputs: [], calls: [{ phase: 'scored', dispatched: true, startedAt: 1, endedAt: 2, finish: { kind: 'stop' }, effective: { ...controls, contextWindow: 1048576 }, modelPolicy: p, preparedConfig: controls, preparedContext: { contextWindow: 1048576 }, finalStreamControls: controls, producer: t.channel === 'p' ? 'pet-chat' : 'agent-loop', producerSource: t.channel === 'p' ? 'pet-chat-scope' : 'native-agent-marker', isAgentLoopRequest: t.channel !== 'p', sessionId: 'synthetic-session', turn: 1, step: 1, timeoutPolicy: { policyHash: p.hash, adapterIdleTimeoutMs: 60000, totalDeadlineMs: null, adapterEvidence: 'native-config' } }], toolEvents: [{ type: 'tool/call', nativeCallId: 'native-1', phase: 'scored' }, { type: 'tool/result', nativeCallId: 'native-1' }] };
+  });
   const { publicPack: pack, privateMapping: mapping } = blindPack(plan, results, plan.seed + ':blind');
   for (const p of pack.pairs) for (const side of ['left','right']) for (const d of ['naturalness','completeness','lowInterruption']) p.scores[side][d] = 3;
   return { plan, results, pack, mapping };

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { verifyCallEvidence } from './a01-model-policy.mjs';
 
 export const BASELINE = '59ec3066f7d42a0452fae01f170c9a8484d5dbe5';
 export const FIXTURE_HASH = 'a37c4a112fd8c0f9451c43765a9b9b8f8445f43df5c5683af2b099e35f24d1f5';
@@ -56,7 +57,17 @@ export function parity(results) {
   if (!Array.isArray(results) || results.length !== 120) problems.push({ code: 'INCOMPLETE_120_RESULTS' });
   for (const result of results) {
     if (result.state !== 'completed') problems.push({ trialId: result.trialId, code: result.state });
-    const scoredCalls = r => (r.calls || []).filter(c => c.phase === undefined || c.phase === 'scored');
+    const scoredCalls = r => (r.calls || []).filter(c => (c.dispatched === true || !['attempt','preparation'].includes(c.recordType)) && (c.phase === undefined || c.phase === 'scored'));
+    // No calls are filtered by producer: title, unknown and failed producers
+    // remain evidence and prevent a new controlled batch from passing.
+    for (const call of result.calls || []) {
+      if (call.recordType === 'attempt' && call.dispatched !== true) { problems.push({ trialId: result.trialId, callId: call.callId, code: 'MODEL_CALL_ATTEMPT_REJECTED', nativeCode: call.failure?.code ?? 'unknown' }); continue; }
+      if (call.phase === 'startup' && call.dispatched !== true) continue; // catalogue-only preflight, no model request
+      if (call.recordType === 'preparation' && call.dispatched !== true) { problems.push({ trialId: result.trialId, callId: call.callId, code: 'MODEL_PREPARATION_NOT_DISPATCHED' }); continue; }
+      let codes; try { codes = verifyCallEvidence(call, call.modelPolicy); } catch { codes = ['MODEL_POLICY_NOT_VERIFIED']; }
+      for (const code of codes) problems.push({ trialId: result.trialId, callId: call.callId ?? null, code });
+      if (call.modelPolicy?.platform !== (result.channel === 'p' ? 'pet' : 'qq')) problems.push({ trialId: result.trialId, code: 'POLICY_CHANNEL_MISMATCH' });
+    }
     if (!scoredCalls(result).length || scoredCalls(result).some(c => !c.effective || !c.effective.contextWindow)) problems.push({ trialId: result.trialId, code: 'EFFECTIVE_MODEL_NOT_VERIFIED' });
     if (scoredCalls(result).some(c => c.dispatched !== true || !Number.isFinite(c.startedAt) || !Number.isFinite(c.endedAt) || c.endedAt < c.startedAt || !['stop','tool-calls','length','error','aborted'].includes(c.finish?.kind))) problems.push({ trialId: result.trialId, code: 'DISPATCH_FINISH_NOT_VERIFIED' });
     const toolRound = result.toolEvents?.some(call => call.type === 'tool/call' && call.nativeCallId && (call.phase === undefined || call.phase === 'scored') && result.toolEvents.some(receipt => receipt.type === 'tool/result' && receipt.nativeCallId === call.nativeCallId));
