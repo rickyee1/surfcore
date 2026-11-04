@@ -2,16 +2,18 @@
 
 ## 11月4日验证更新
 
-当前主源码包含已接受的P2材料8e7232c与A01控制0fa1f35。DSH、记忆服务和QQ桥接处于停止状态，用户已恢复SnowLuma登录。当前集成状态以本节及HANDOFF顶部为准。
+当前主源码已接受P2材料8e7232c、A01控制0fa1f35和渠道修复5ebc04d。3c7d139已部署并同步用户fork，真实远端归档747项一致，audit110/110、regressions16通过。DSH、记忆、QQ桥接和桌宠运行，SnowLuma账号在线、DSH就绪。当前集成状态以本节及HANDOFF顶部为准，后文9f观察属于历史检查点。
 
 | 项目 | 本次证据 | 后续工作 |
 | --- | --- | --- |
 | P2材料 | attempt2功能独立通过，22项真实SQLCipher检查，主仓四文件canonical一致 | 独立planner与完整协调器/可信事件/UI接线 |
 | A01控制 | attempt2功能独立通过，透明iterator及拒绝attempt记录修复，主仓13文件一致 | 新候选冻结后的120次对照与盲评 |
 | 原版新参数烟测 | 两条真实模型分别完成隔离QQ和Pet流程，2204ms/819ms，实际call证据通过，模型目录显示DeepSeek-V4.1-Flash | 候选实测与完整比较，旧120次FAIL保留 |
-| 渠道清理 | attempt6已修复所有权保留、重试与控制台重启，独立仍发现部分消费者漏报cleanup | semantic-host7集中修全部直接/后台消费者并复核 |
+| 渠道清理 | attempt7功能独立通过，原五个反例、native64及HTTP/HTML可见状态通过，采用5ebc04d | 最终P2集成回归 |
 | 备份与恢复 | 停机快照3817文件/95669162字节源hash一致，真实DPAPI数据库副本恢复后24条原记录digest相同，删除标记仍删除，重开通过 | 角色包完整UI流程与第二台物理电脑迁移 |
-| 完整purpose | 独立planner/model/attention.status有15+4项检查，进入独立复核 | QQ/Pet单载体、配置/UI、真实主动联系 |
+| 完整purpose | 初审CP1/CP2失败保留，修复连同完整协调器、单载体与UI在隔离树验证 | 整单元独立审查、最终部署和真实主动联系 |
+| Explorer | 新合成目录窗口和sample.txt由CUA实际核验，broker原收据unknown保留，host状态/提示修补23237ad独立通过 | 最终重启部署，旧执行不重放 |
+| 角色包选择器 | 正常设置入口到角色包页面可用，文件按钮已点击 | CUA因当前浏览器URL不可可靠识别停止操作，实际选择文件仍未核验 |
 | 设备 | 用户暂停实际设备测试 | 等用户恢复设备实测 |
 
 新恢复证据位于 `.local/evidence/full-integration/recovery-clone-20261104-v2/result.json`。首个夹具共用source_ref使两个合成标记按删除闭包共同删除，诊断和失败日志已保留，第二个全新副本改用独立来源后通过。live数据库、独立删除库、DPAPI文件hash均未变化。A01烟测证据位于 `a01-controlled-original-smoke-20261104.json`，startup目录预检准备项按原契约保留，实际dispatch检查均通过。

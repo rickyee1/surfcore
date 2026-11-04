@@ -2,6 +2,12 @@
 
 ## 2026-11-04 后续验证
 
+3c7d139检查点已部署并推送用户fork，真实远端归档747项匹配。该版本包含已接受的P2材料、A01控制和5ebc04d渠道清理。semantic-host7独立功能验收通过，原反例、native64及普通入站到管理HTTP/HTML状态显示均通过。原失败记录保留。QQ账号在线、DSH就绪、Pet持续poll，主动机制关闭，media disabled且无lease。
+
+本机工具经普通Pet入口、精确确认后打开合成目录。CUA核验Explorer窗口399082的实际路径及sample.txt，broker收据仍为unknown，原执行不重放。host把unknown降为failed及提示失真已修补并独立通过，采用为23237ad，待统一重启。新回归夹具早期可能打开TEMP目录，后续加入启动前Popen硬拒绝和handle前RPC拦截，所有失败保留。相关证据位于.local/evidence/full-integration/pet-tool-explorer-live-receipt-20261104.json及explorer-outcome-independent-review-20261104.md，修补详情见[工具结果case](2026-11-04-tool-outcome-unknown.md)。
+
+本地管理从DSH正常设置链接可访问。角色包文件按钮已触发，CUA随后因无法可靠识别Edge当前URL停止本轮操作，实际文件选择仍未核验。完整目的单元、最终新A01120及当前版本两小时观察继续进行，夜间单条额度未使用，设备实测保持用户暂停状态。
+
 已接受P2素材attempt2并提交8e7232c。材料、人格及原作用域快照的22项检查和三个独立修复反例通过。常驻知识准入使用保守正向文法，部分稳定旧文本会被排除，已派发的旧角色写入无法撤回，迟到结果会被拒绝且新角色状态保持正确。完整purpose接线另行实施。
 
 A01控制attempt2功能独立通过并提交0fa1f35。新off seed独立保存，保留旧max seed及完整旧120结果。原版两条真实原生模型烟测均完成，隔离QQ首条2204ms、Pet819ms，每次实际dispatch都通过verifyCallEvidence。native目录返回DeepSeek-V4.1-Flash、context1048576，远端实际版本未暴露。此烟测的118条NOT_RUN属于刻意未执行的完整plan占位，完整比较尚待新候选冻结。证据在`.local/evaluations/a01/controlled-original-smoke-20261104`。

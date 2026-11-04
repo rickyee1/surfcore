@@ -1,6 +1,6 @@
 # 路线图与路线守则（ROADMAP）
 
-当前续作更新于2026-11-04。已接受并提交P2材料8e7232c及A01控制0fa1f35。新策略原版两条真实模型烟测、真实加密数据副本恢复和DPAPI重开通过。semantic-host7修复清理结果漏报，完整目的规划单元送审，协调器和QQ/Pet/UI接线继续推进。详见FULL_INTEGRATION_ACCEPTANCE的11月4日更新与HANDOFF顶部。
+当前续作更新于2026-11-04。P2材料8e7232c、A01控制0fa1f35和渠道清理5ebc04d已接受，3c7d139已部署并同步用户fork，远端747项一致。QQ、模型宿主和桌宠在线。完整目的协调器及单载体/UI接线继续隔离验证，planner初审CP1/CP2失败保留。最终候选的完整A01与两小时观察尚待执行。详见FULL_INTEGRATION_ACCEPTANCE的11月4日更新与HANDOFF顶部。
 
 > 2026-11-02 fork：按用户方案实施本地能力服务及M0–M2接线，SurfCore保持唯一聊天编排。范围与未完成项见[LOCAL_CAPABILITIES.md](LOCAL_CAPABILITIES.md)。用户已授权保存到其fork，不包含上游发布、tag或Release。
 
